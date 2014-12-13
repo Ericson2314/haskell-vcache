@@ -1,0 +1,70 @@
+Name: vcache
+Version: 0.1
+Synopsis: large, persistent, memcached values and structure sharing for Haskell 
+Category: Database
+Description:
+  VCache leverages LMDB (a memory-mapped key-value store) to provide 
+  a simple persistence and external caching model for very large, 
+  structured values in one Haskell process - values that may weigh
+  in at gigabytes or terabytes, but for which you're observing or
+  manipulating only small elements at a time.
+  .
+  Large structures are divided into smaller structures that may be
+  independently loaded into memory as needed. The `VRef` type serves
+  as the boundary between structured elements. VRefs are immutable
+  after construction. Structure sharing is reliably applied, also at
+  the VRef boundary. The values must have acyclic representation.
+  .
+  New values added to VCache at the same time will be place near each
+  other in physical memory, which supports memory locality [1]. 
+  .
+  VCache uses its own GC, based on simple reference counting. VRef
+  objects in memory serve as additional, ephemeral roots, which is
+  extremely convenient, but does limit a VCache database to one
+  active process.
+  .
+  VCache is very similar to the packages 'perdure' and 'acid-state'.
+  .
+  VCache was created as a scalable alternative to acid-state. While
+  acid-state can scale if you throw enough memory at it, RAM is more
+  expensive than cold storage and has other issues like restart time
+  and impact on the garbage collector. Compared to perdure, VCache 
+  has advantages from ephemeral roots and LMDB's scalability. 
+  .
+  [1]  <http://www.cs.cmu.edu/~rwh/papers/iolambda/short.pdf>
+  
+Author: David Barbour
+Maintainer: dmbarbour@gmail.com
+Homepage: http://github.com/dmbarbour/haskell-vcache
+
+Package-Url: 
+Copyright: (c) 2014 by David Barbour
+License: BSD2
+license-file: LICENSE
+Stability: experimental
+build-type: Simple
+cabal-version: >= 1.16.0.3
+
+Source-repository head
+  type: git
+  location: http://github.com/dmbarbour/haskell-vcache.git
+
+Library
+  hs-Source-Dirs: hsrc_lib
+  default-language: Haskell2010
+  Build-Depends: base (>= 4.6 && < 5)
+    , direct-murmur-hash
+    , hashable
+    , bytestring
+    , cereal
+    , lmdb
+
+  Exposed-Modules:
+    Database.VCache
+
+  Other-Modules:
+    Database.VCache.Types
+    Database.VCache.Hash
+   
+  ghc-options: -Wall -auto-all
+
