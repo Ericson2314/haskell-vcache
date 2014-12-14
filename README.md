@@ -17,4 +17,6 @@ Structure sharing is enforced: two `VRef` objects are equal if and only if their
 
 Newly allocated values are appended to the LMDB database. This mitigates insertion overheads and simplifies reasoning about asymptotic cache performance, e.g. serving as an effective basis for reasoning about cache-optimal algorithms in work by Guy Blelloch and Robert Harper [1](http://lambda-the-ultimate.org/node/5021).
 
-The VCache persistence layer is very simple: a table of `(VRef,VRef)` pairs, corresponding to a key-value table. These values are persistent roots, and values held in this table will not be garbage collected.
+The VCache persistence layer is very simple: transactional updates to a simple table of `(key,value)` pairs, where the key is an arbitrary `ByteString` and the value is an arbitrary `VRef`. The idea is that there shouldn't be a huge database of keys, rather just a few keys that represent full databases as Haskell values.
+
+
