@@ -45,9 +45,9 @@ type Address = Word64
 --   values are equal. VRefs from different caches are never equal.
 --
 data VRef a = VRef 
-    { vref_addr   :: {-# UNPACK #-} !Address            -- address within the cache
-    , vref_cache  :: {-# UNPACK #-} !(MVar (Cached a))  -- cached value & weak refs 
-    , vref_origin :: !VCache                            -- cache manager for VRef
+    { vref_addr   :: {-# UNPACK #-} !Address            -- ^ address within the cache
+    , vref_cache  :: {-# UNPACK #-} !(MVar (Cached a))  -- ^ cached value & weak refs 
+    , vref_origin :: !VCache                            -- ^ cache manager for this VRef
     } deriving (Typeable)
 
 instance Eq (VRef a) where
