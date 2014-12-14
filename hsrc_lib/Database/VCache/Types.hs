@@ -1,8 +1,15 @@
-{-# LANGUAGE DeriveDataTypeable, ExistentialQuantification #-}
+{-# LANGUAGE DeriveDataTypeable
+  , ImpredicativeTypes
+  , GeneralizedNewtypeDeriving 
+  #-}
 
 module Database.VCache.Types
     ( Address, VRef(..), VCache(..)
     , Eph(..), EphMap, Cached(..)
+    , VPut(..), VGet(..) 
+    , VGetSt(..), vgst_origin
+    , VCacheable(..)
+    , VRef_, Eph_
     ) where
 
 import Data.Word
@@ -11,7 +18,12 @@ import Data.Typeable
 import Data.IORef
 import Data.Unique
 import Data.IntMap.Strict (IntMap)
+import qualified Data.Binary.Get as B
+import qualified Data.Binary.Put as B
+import Control.Monad
+import Control.Applicative
 import Control.Concurrent.MVar
+import Control.Monad.Trans.State
 import System.Mem.Weak (Weak)
 import Database.LMDB.Raw
 
@@ -98,7 +110,7 @@ data VCache = VCache
     , vcache_tracker    :: {-# UNPACK #-} !(IORef EphMap)
 
     -- Further, I need:
-    --   a thread for performing writes and GC
+    --   a thread performing writes and incremental GC
     --   a channel to talk to that thread
     }
 
@@ -119,12 +131,13 @@ data VCache = VCache
 -- This ephemeron table supports structure sharing, caching, and GC.
 --
 -- I model this ephemeron by use of `mkWeakMVar`.
-data Eph = forall a . VCacheable a => Eph
+data Eph a = Eph
     { eph_addr :: {-# UNPACK #-} !Address
     , eph_type :: !TypeRep
     , eph_weak :: {-# UNPACK #-} !(Weak (MVar (Cached a)))
     }
-type EphMap = IntMap [Eph] -- bucket hashmap on address
+type Eph_ = forall a . Eph a -- forget the value type.
+type EphMap = IntMap [Eph_] -- bucket hashmap on address
 
 -- Every VRef has a hole (via MVar) to potentially record a cached
 -- value without loading it from a bytestring every time. 
@@ -135,39 +148,66 @@ type EphMap = IntMap [Eph] -- bucket hashmap on address
 -- the lowest bit reset to zero whenever we read from the
 -- cache (modulo `deref'`). 
 data Cached a = Cached 
-    { c_value :: a
+    { c_value :: !a
     , c_meta  :: {-# UNPACK #-} !Word32
     }
 
 
--- | To be utilized with VCache, a value must first be serializable
--- as a simple sequence of bytes and VRefs, and must be Typeable to
--- support caching and ephemeron tracking in the Haskell layer. 
+-- | To be utilized with VCache, a value must be serializable as a 
+-- simple sequence of bytes and VRefs, and must be Typeable to support
+-- caching and tracking at the Haskell layer. Stashing then caching a
+-- value should result in an equivalent value. 
 --
--- It's up to developers to ensure that the effects of serializing a
--- value, followed by loading it, returns an equivalent value. Also,
--- recorded VRefs must be loaded in the same order they were emitted.
---
--- Under the hood, a VRef is essentially recorded as a pair:
+-- Under the hood, a VRef is effectively recorded as a pair:
 --
 --    ([VRef],ByteString)
 --
--- These VRefs must be loaded in the same order and quentity as they 
--- were emitted (thus, the ByteString should contain hints about when
--- to ask for a VRef). But there is zero risk of accidentally loading
--- bytes from a VRef or vice versa. VRefs have an overhead of 8 bytes
--- when recorded (plus a little to track count).
+-- The VRefs must be loaded in the same order and quentity as emitted
+-- (thus, the ByteString should contain hints about when to ask for a
+-- VRef). But there is no risk of accidentally confusing bytes from a
+-- VRef with bytes from the bytestring. This separation simplifies the
+-- VCache garbage collector because it can trace values without knowing
+-- their type information, and without any sophisticated parsing.
 --
--- 
+-- The VPut and VGet methods build above Put and Get from Data.Binary.
+-- Any Put or Get method for binary strings may be lifted into them. 
 -- 
 class (Typeable a) => VCacheable a where 
+    -- | Stash is a function that will record the value into the VCache
+    -- auxiliary store as an ad-hoc sequence of VRefs and binary data. 
+    stash :: a -> VPut ()
 
+    -- | Cache will load a value from the auxiliary space into Haskell
+    -- memory, returning the value in weak-head normal form. This operation
+    -- must load bytes and VRefs in the same quantity and ordering as they
+    -- were stashed, and should result in an equivalent value.
+    --
+    -- Developers should ensure that caching is backwards compatible for
+    -- all versions of a type. This might be achieved by recording type
+    -- information, or by using a more generic intermediate structure.
+    cache :: VGet a
 
+-- VRef without type information. 
+type VRef_ = forall a . VRef a
 
+-- | VPut allows a program to emit a sequence of VRefs and binary data.
+newtype VPut a = VPut { _vput :: StateT [VRef_] B.PutM a } 
+    deriving (Functor, Applicative, Monad)
 
+-- | VGet allows a program to consume a sequence of VRefs and binary
+-- data in order to rebuild a complex Haskell value.
+newtype VGet a = VGet { _vget :: StateT VGetSt B.Get a }
+    deriving (Functor, Applicative, Alternative, Monad, MonadPlus)
 
+-- When performing Get, we'll want to:
+--   guarantee the parent VRef is not GC'd.
+--   access cached representations of existing VRefs.
+--   load a stack of VRef addresses into the resulting value.
+data VGetSt = VGetSt
+    { vgst_stack  :: ![Address] -- stack of addresses to read as VRefs
+    , vgst_source :: !VRef_     -- prevent GC of parent; access VCache
+    }
 
-
-
-
+vgst_origin :: VGetSt -> VCache
+vgst_origin = vref_origin . vgst_source
 
