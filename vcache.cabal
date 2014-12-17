@@ -54,20 +54,23 @@ Library
   default-language: Haskell2010
   Build-Depends: base (>= 4.6 && < 5)
     , direct-murmur-hash
-    , bytestring
-    , binary
+    , bytestring, binary
     , transformers
     , containers
+    , stm
     , lmdb
     , system-fileio
     , system-filepath
 
+
+
   Exposed-Modules:
     Database.VCache
+    Database.VCache.VCacheable
+    Database.VCache.Hash
 
   Other-Modules:
     Database.VCache.Types
-    Database.VCache.Hash
    
   ghc-options: -Wall -auto-all
 

@@ -1,13 +1,21 @@
 
 
 module Database.VCache
-    ( VRef, VCache, VCacheable(..) 
+    ( VRef, PVar
+    , VCache
+
+    , Cacheable(..) 
+    , VGet, VPut
 
     -- * Serialization
-    , VPut, VGet
+    -- , VPut, VGet
+
+    -- * Persistence
 
     -- * Miscellaneous
-    , vref_origin
+    -- , region
+    module Database.VCache.Cacheable
     ) where
 
 import Database.VCache.Types
+import Database.VCache.Cacheable

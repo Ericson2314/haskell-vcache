@@ -1,6 +1,6 @@
 
 -- I don't need a secure hash for content addressing. Here, I'm using
--- murmur3, or the first eight bytes thereof.
+-- murmur3, usually the first 8 bytes thereof.
 module Database.VCache.Hash
     ( hash
     ) where
@@ -11,8 +11,12 @@ import qualified Data.Digest.Murmur3 as M3
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Unsafe as B
 
+hash :: B.ByteString -> B.ByteString
+hash = M3.asByteString . M3.hash
+
+{-
 hash :: B.ByteString -> Word64
-hash = unsafeWord64be . M3.asByteString . M3.hash
+hash = unsafeWord64be . hashBytes
 
 unsafeWord64be :: B.ByteString -> Word64
 unsafeWord64be = \ s ->
@@ -24,3 +28,5 @@ unsafeWord64be = \ s ->
     (fromIntegral (s `B.unsafeIndex` 5) `shiftL` 16) .|.
     (fromIntegral (s `B.unsafeIndex` 6) `shiftL` 8)  .|.
     (fromIntegral (s `B.unsafeIndex` 7))
+-}
+
