@@ -5,8 +5,8 @@ module Database.VCache.Hash
     ( hash
     ) where
 
-import Data.Word (Word64)
-import Data.Bits (shiftL, (.|.))
+--import Data.Word (Word64)
+--import Data.Bits (shiftL, (.|.))
 import qualified Data.Digest.Murmur3 as M3
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Unsafe as B

@@ -4,8 +4,6 @@ module Database.VCache
     ( VRef, PVar
     , VCache
 
-    , Cacheable(..) 
-    , VGet, VPut
 
     -- * Serialization
     -- , VPut, VGet
@@ -14,8 +12,8 @@ module Database.VCache
 
     -- * Miscellaneous
     -- , region
-    module Database.VCache.Cacheable
+    , module Database.VCache.VCacheable
     ) where
 
 import Database.VCache.Types
-import Database.VCache.Cacheable
+import Database.VCache.VCacheable

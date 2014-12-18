@@ -5,36 +5,35 @@
 
 -- Internal file. Lots of types.
 module Database.VCache.Types
-    ( Address
+    ( Address, HashVal
     , VRef(..), Cached(..), VRef_
     , Eph(..), Eph_, EphMap 
-    , PVar(..),PVar_, PVarEphMap
-    , VTxn(..), VTxnSt(..) 
+    , PVar(..), PVar_
+    , PVEph(..), PVEph_, PVEphMap
+    , VTx(..)
     , VCache(..)
+    , VCRoot(..)
     ) where
 
 import Data.Word
 import Data.Function (on)
 import Data.Typeable
 import Data.IORef
-import Data.Unique
 import Data.IntMap.Strict (IntMap)
 import Data.Map.Strict (Map)
-import Data.Array.MArray (MArray)
-import qualified Data.ByteString as BS
-import qualified Data.Binary.Get as B
-import qualified Data.Binary.Put as B
+import Data.ByteString (ByteString)
 import Control.Monad
 import Control.Monad.STM (STM)
 import Control.Applicative
 import Control.Concurrent.MVar
 import Control.Concurrent.STM.TVar
 import Control.Monad.Trans.State
-import Control.Monad.Trans.Class
 import System.Mem.Weak (Weak)
+import System.FileLock (FileLock)
 import Database.LMDB.Raw
 
 type Address = Word64
+type HashVal = Word64
 
 -- | A VRef is an opaque reference to an immutable value stored in an
 -- auxiliary address space backed by the filesystem. This allows very
@@ -64,14 +63,30 @@ type Address = Word64
 data VRef a = VRef 
     { vref_addr   :: {-# UNPACK #-} !Address            -- ^ address within the cache
     , vref_cache  :: {-# UNPACK #-} !(MVar (Cached a))  -- ^ cached value & weak refs 
-    , vref_region :: !VCacheRoot                        -- ^ cache manager for this VRef
+    , vref_region :: !VCRoot                            -- ^ cache manager for this VRef
     } deriving (Typeable)
--- VRef without type information. 
-type VRef_ = forall a . VRef a
+instance Eq (VRef a) where (==) = (==) `on` vref_cache
+type VRef_ = forall a . VRef a -- VRef without type information. 
 
-instance Eq (VRef a) where
-    (==) a b = ((==) `on` vref_addr) a b 
-            && ((==) `on` (vcache_id . vref_region)) a b
+
+
+-- IDEA:
+-- 
+-- Also support a ZCV 'slice' concept, as a special case involving
+-- a zero cache, zero copy value Essentially, this might work like:
+--
+--  data ZCV = ZCV 
+--   { zcv_addr :: {-# UNPACK #-} !Address
+--   , zcv_weak :: {-# UNPACK #-} !(MVar ())
+--   , zcv_region :: !VCRoot
+--   }
+--
+-- readZCV :: ZCV -> VGet a -> a
+--
+-- Actually, a possibly more interesting variation is to use `VGet a`
+-- directly in the type of a VRef. However, that would hinder Eq type
+-- for VRefs, and thus might not be wortwhile.
+
 
 -- For every VRef we have in memory, we need an ephemeron in a table.
 -- This ephemeron table supports structure sharing, caching, and GC.
@@ -112,10 +127,10 @@ data Cached a = Cached
 --
 -- cache control modes?
 -- 
---  0: no timeout
---  1: short-lived
---  2: long-lived
---  3: locked into cache
+--  0: minimal timeout
+--  1: short timeout
+--  2: long timeout
+--  3: lock into cache
 --  
    
 
@@ -123,40 +138,35 @@ data Cached a = Cached
 -- by a short bytestring. PVars can be manipulated transactionally, and
 -- these transactions may also integrate with STM TVars. 
 --
---     loadPVarIO :: (Cacheable a) => VCache -> ByteString -> VRef a -> IO (PVar a)
---     loadPVar   :: (Cacheable a) => VCache -> ByteString -> VRef a -> VTxn (PVar a)
+--     loadPVarIO :: (VCacheable a) => VCache -> ByteString -> VRef a -> IO (PVar a)
+--     loadPVar   :: (VCacheable a) => VCache -> ByteString -> VRef a -> VTxn (PVar a)
 --     readPVar   :: PVar a -> VTxn (VRef a)
 --     writePVar  :: PVar a -> VRef a -> VTxn ()
 --     runVTxn    :: VTxn a -> IO a
 --
--- See VTxn for more information.
 data PVar a = PVar
     { pvar_content :: !(TVar (VRef a))
-    , pvar_name    :: !ByteString
-    , pvar_region  :: !VCacheRoot                     -- 
-    , pvar_self    :: {-# UNPACK #-} !(MVar (PVar a)) -- supports PVarEphMap
+    , pvar_name    :: !ByteString -- full name (including path)
+    , pvar_region  :: !VCRoot     -- 
     } deriving (Typeable)
+instance Eq (PVar a) where (==) = (==) `on` pvar_content
 type PVar_ = forall a . PVar a
-type PVarEphMap :: Map ByteString (Weak (MVar (PVar a)))
+data PVEph a = PVEph !TypeRep !(Weak (TVar (VRef a)))
+type PVEph_ = forall a . PVEph a
+type PVEphMap = Map ByteString PVEph_
 
 
--- | A VCache represents a filesystem-backed address space via LMDB.
+-- | A VCache represents a filesystem-backed address space.
 --
 -- This allows an address space much larger than system memory to be
 -- efficiently utilized... at least for applications where the working
 -- set is much smaller than total storage requirements. Also, VCache
--- can efficiently support persistent variables, and may serve as an
--- alternative to the acid-state package. VCache is not a database,
--- but could be used to build one. 
+-- supports persistent variables with atomic updates, and thus serves
+-- as an alternative to the acid-state package. 
 --
--- VCache supports multi-threaded Haskell concurrency. However, multiple
--- instances of the VCache object would be a problem: LMDB is used with
--- the MDB_NOLOCK option, and several features (GC, PVars) assume that
--- only a single VCache is using the LMDB backing file at one time. 
--- 
--- Aside: Removing the lock unfortunately limits hot-copy features of 
--- LMDB. If you need such features, consider modeling them via Restful 
--- API for your application, e.g. as you might have do for acid-state.
+-- A given VCache file may only be opened by one process at a time, and
+-- only once within that process. This is weakly enforced by lockfile.
+--
 --
 -- It is safe to use more than one VCache object, so long as each is
 -- backed by a different file. This might be motivated for similar 
@@ -172,12 +182,12 @@ type PVarEphMap :: Map ByteString (Weak (MVar (PVar a)))
 --
 -- See PVar and VRef for more information.
 data VCache = VCache
-    { vcache_rename :: !(ByteString -> Maybe ByteString)    -- rename PVars
-    , vcache_root   :: !VCacheRoot                          
-    }
+    { vcache_root :: !VCRoot 
+    , vcache_path :: ByteString 
+    } deriving (Eq)
 
-data VCacheRoot = VCacheRoot
-    { vcache_id         :: !Unique 
+data VCRoot = VCRoot
+    { vcache_lockfile   :: {-# UNPACK #-} !FileLock -- prevent opening VCache twice
 
     -- LMDB contents. 
     , vcache_db_env     :: !MDB_env
@@ -187,31 +197,38 @@ data VCacheRoot = VCacheRoot
     , vcache_db_refcts  :: {-# UNPACK #-} !MDB_dbi' -- address → Word64
     , vcache_db_refct0  :: {-# UNPACK #-} !MDB_dbi' -- address (queue, unsorted?)
 
-    -- resource tracking for GC and structure sharing.
-    , vcache_tracker    :: {-# UNPACK #-} !(IORef EphMap)
+    , vcache_mem_vrefs  :: {-# UNPACK #-} !(IORef EphMap) -- track VRefs in memory
+    , vcache_mem_pvars  :: {-# UNPACK #-} !(IORef PVEphMap) -- track PVars in memory
+   
 
     -- requested weight limit for cached values
-    , vcache_weightlim  :: {-# UNPACK #-} !(IORef Int)
-
+    -- , vcache_weightlim  :: {-# UNPACK #-} !(IORef Int)
 
     -- share persistent variables for safe STM
-    , vcache_pvars      :: {-# UNPACK #-} !(IORef PVarEphMap)
 
     -- Further, I need...
+    --   a FileLock
     --   a thread performing writes and incremental GC
     --   a channel to talk to that thread
     --   queue of MVars waiting on synchronization/flush.
 
     }
 
--- Behavior of the forkOS thread:
---   create a transaction and a callback resource
---   wait on the callback to indicate time to commit
---   commit the transaction in same OS thread, start a new one (unless halted)
---   optional continuation action
---      start a new transaction
---      synchronize to disk
---      report synchronization to anyone waiting on it
+instance Eq VCRoot where (==) = (==) `on` vcache_lockfile
+
+-- action: write a value to the database.
+{-
+data WriteVal = WriteVal
+    { wv_addr :: {-# UNPACK #-} !Address
+    , wv_hash :: {-# UNPACK #-} !HashVal
+    , wv_data :: !ByteString
+    }
+-}
+
+
+
+
+
 --
 -- Behavior of the timer thread:
 --   wait for a short period of time
@@ -225,6 +242,21 @@ data VCacheRoot = VCacheRoot
 --
 -- Behavior of the main writer thread:
 --
+--   wait for old readers 
+--   create a write transaction
+--   create a timer/tick thread
+--   select the first unit of work
+--   
+
+-- Behavior of the forkOS thread:
+--   create a transaction and a callback resource
+--   wait on the callback to indicate time to commit
+--   commit the transaction in same OS thread, start a new one (unless halted)
+--   optional continuation action
+--      start a new transaction
+--      synchronize to disk
+--      report synchronization to anyone waiting on it
+
 --   if a tick has occurred
 --     finish current transaction
 --     start a new one
@@ -238,24 +270,22 @@ data VCacheRoot = VCacheRoot
 
 -- DESIGN:
 --   Using MDB_NOLOCK:
---     no need for a 
---   Single background thread for writes. Using MDB_NOLOCK
---   Any number of reader threads. Using MDB_NOLOCK.
---   Reader threads are "generational." 
---   
+--     No need for a thread to handle the LMDB write mutex.
+--
+--     Instead, I need to track reader threads and prevent
+--     writers from operating while readers exist for two
+--     generations back. (Or was it three?)
+--
+--     Thus: the writer waits on readers, but with double or
+--     triple buffering for pipeline concurrency.
 --
 --  THREADS
 --   
---   My assumption is that there is only one writer for a VCache
---   anyway, so I might as well grab the write mutex every time
---   until halted (crash-only design).
---
 --   The writer thread should process a simple command stream
 --   consisting primarily of writes.
 --
 --   Reader transactions may then be created as needed in Haskell
---   threads, mostly to deref values. A potential concern is what
---   happens if I have a very large number of readers?
+--   threads, mostly to deref values. 
 --
 --  VREF 
 --
@@ -304,19 +334,20 @@ data VCacheRoot = VCacheRoot
 
 
 
--- | The VTxn transactions build upon STM, and allow use of arbitrary
--- PVars in addition to STM variables. The PVars may originate from
--- multiple VCaches.
+-- | The VTx transactions build upon STM, and allow use of arbitrary
+-- PVars in addition to STM resources. 
 --
--- As with STM, VTxn uses optimistic concurrency. This has the normal
--- caveats: progress is guaranteed, but long-running transactions may
--- be starved by faster transactions. If contention is a valid concern,
--- external coordination can always alleviate the problem.
+-- The PVars may originate from multiple VCaches. However, in that
+-- case atomicity cannot be guaranteed because the program might crash
+-- between updating two VCaches. Transactions are atomic only if at 
+-- most one VCache is involved.
 --
--- These transactions operate independently from LMDB's transactions.
--- The latter are simply a poor fit for Haskell's lightweight threads.
+-- Durability is optional. Asking for a durable transaction just means
+-- you wait for all the VCaches to finish writing and synching before
+-- you return from the transaction request. If you don't write, the
+-- durable transactions will not perform any synch.
 -- 
-newtype VTxn a = VTxn { _vtxn :: StateT [PVar_] STM a }
+newtype VTx a = VTx { _vtx :: StateT [PVar_] STM a }
     deriving (Monad, Functor, Applicative, Alternative, MonadPlus)
     -- Internally, I'm just tracking a list of PVars written. 
     --
