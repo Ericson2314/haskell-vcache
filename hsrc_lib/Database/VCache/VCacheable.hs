@@ -3,6 +3,9 @@ module Database.VCache.VCacheable
     ( VCacheable(..), VPut, VGet
     ) where
 
+import Control.Applicative
+import Control.Monad
+
 import Data.Word
 import Data.Typeable
 import Database.VCache.Types
@@ -61,24 +64,97 @@ data VPutS = VPutS
     , vput_target   :: {-# UNPACK #-} !PtrLoc
     , vput_limit    :: {-# UNPACK #-} !PtrEnd
     }
-data VPutR a = VPutR
-    { vput_state  :: !VPutS
-    , vput_result :: a
+data VPutR r = VPutR
+    { vput_result :: r
+    , vput_state  :: !VPutS
     }
 
 -- | VGet represents an action that parses a value from a string of bytes
--- and values. Parser combinators are supported, though are of recursive
--- descent in style (unsuitable for long-running streams). 
-newtype VGet a = VGet { _vget ::VGetS -> IO (VGetR a) }
+-- and values. Parser combinators are supported, and are of recursive
+-- descent in style. It is possible to isolate a 'get' operation to a subset
+-- of values and bytes, requiring a parser to consume exactly the requested
+-- quantity of content.
+--
+-- VGet may fail with a very simple error string. Developers may wrap these
+-- failure messages with better contextual information, e.g. about what is
+-- expected.
+newtype VGet a = VGet { _vget :: VGetS -> IO (VGetR a) }
 data VGetS = VGetS 
     { vget_children :: ![Address]
     , vget_target   :: {-# UNPACK #-} !PtrLoc
     , vget_limit    :: {-# UNPACK #-} !PtrEnd
     }
-data VGetR a 
-    = VGetR !a !VGetS
-    | VGetError !String
+data VGetR r 
+    = VGetR r !VGetS
+    | VGetE String
 
+instance Functor VPut where 
+    fmap f m = VPut $ \ s -> 
+        _vput m s >>= \ (VPutR r s') ->
+        return (VPutR (f r) s')
+    {-# INLINE fmap #-}
+instance Applicative VPut where
+    pure = return
+    (<*>) = ap
+    {-# INLINE pure #-}
+    {-# INLINE (<*>) #-}
+instance Monad VPut where
+    return r = VPut (\ s -> return (VPutR r s))
+    m >>= k = VPut $ \ s ->
+        _vput m s >>= \ (VPutR r s') ->
+        _vput (k r) s'
+    m >> k = VPut $ \ s ->
+        _vput m s >>= \ (VPutR _ s') ->
+        _vput k s'
+    {-# INLINE return #-}
+    {-# INLINE (>>=) #-}
+    {-# INLINE (>>) #-}
 
+instance Functor VGet where
+    fmap f m = VGet $ \ s ->
+        _vget m s >>= \ c ->
+        return $ case c of
+            VGetR r s' -> VGetR (f r) s'
+            VGetE msg -> VGetE msg 
+    {-# INLINE fmap #-}
+instance Applicative VGet where
+    pure = return
+    (<*>) = ap
+    {-# INLINE pure #-}
+    {-# INLINE (<*>) #-}
+instance Monad VGet where
+    fail msg = VGet (\ _ -> return (VGetE msg))
+    return r = VGet (\ s -> return (VGetR r s))
+    m >>= k = VGet $ \ s ->
+        _vget m s >>= \ c ->
+        case c of
+            VGetE msg -> return (VGetE msg)
+            VGetR r s' -> _vget (k r) s'
+    m >> k = VGet $ \ s ->
+        _vget m s >>= \ c ->
+        case c of
+            VGetE msg -> return (VGetE msg)
+            VGetR _ s' -> _vget k s'
+    {-# INLINE fail #-}
+    {-# INLINE return #-}
+    {-# INLINE (>>=) #-}
+    {-# INLINE (>>) #-}
+instance Alternative VGet where
+    empty = mzero
+    (<|>) = mplus
+    {-# INLINE empty #-}
+    {-# INLINE (<|>) #-}
+instance MonadPlus VGet where
+    mzero = fail "mzero"
+    mplus f g = VGet $ \ s ->
+        _vget f s >>= \ c ->
+        case c of
+            VGetE _ -> _vget g s
+            r -> return r
+    {-# INLINE mzero #-}
+    {-# INLINE mplus #-}
+    
+
+    
 
 
