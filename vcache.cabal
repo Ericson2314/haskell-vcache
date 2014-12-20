@@ -59,17 +59,16 @@ Library
     , containers
     , stm
     , lmdb
-    , filelock
-    , system-fileio
-    , system-filepath
+    , filelock, easy-file
 
   Exposed-Modules:
     Database.VCache
     Database.VCache.VCacheable
-    Database.VCache.Hash
 
   Other-Modules:
     Database.VCache.Types
+    Database.VCache.Impl
+    Database.VCache.Hash
    
   ghc-options: -Wall -auto-all
 

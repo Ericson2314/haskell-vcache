@@ -1,6 +1,31 @@
 {-# LANGUAGE ImpredicativeTypes #-}
 module Database.VCache.VCacheable
     ( VCacheable(..), VPut, VGet
+    --, putWord8, putVRef
+    --, getWord8, getVRef
+
+    --, isolate
+    --, reserve 
+    --, unsafePutWord8
+    --, unsafeGetWord8
+{-
+    , putVRef, getVRef
+    , putByteString, getByteString
+    , putByteStringLazy, getByteStringLazy
+    , getRemainingBytes, getRemainingBytesLazy
+    , putVarInt, getVarInt
+    , putChar, getChar
+    , putString, getString
+    , putStorable, getStorable
+    , putStorables, getStorables
+
+    , putWord16le, getWord16le
+    , putWord16be, getWord16be
+    , putWord32le, getWord32le
+    , putWord32be, getWord32be
+    , putWord64le, getWord64le
+    , putWord64be, getWord64be
+-}
     ) where
 
 import Control.Applicative
@@ -10,6 +35,10 @@ import Data.Word
 import Data.Typeable
 import Database.VCache.Types
 import Foreign.Ptr
+import Foreign.Storable
+import Foreign.Marshal.Alloc
+
+import Database.VCache.Types
 
 -- thoughts: should I bother with unboxed tuples and such 
 -- to speed this up? I'm not sure. Let's leave low level
@@ -22,7 +51,7 @@ import Foreign.Ptr
 -- 
 -- Under the hood, structured data is serialized as a pair:
 --
---    (ByteString,[VRef])
+--    ([VRef],ByteString)
 --
 -- Bytes and VRefs must be loaded in the same order and quantity as
 -- they were emitted. However, there is no risk of reading VRef 
@@ -49,112 +78,112 @@ class (Typeable a) => VCacheable a where
     -- separate layer, cf. SafeCopy.
     cache :: VGet a
 
-type Ptr8 = Ptr Word8
-type PtrIni = Ptr8
-type PtrEnd = Ptr8
-type PtrLoc = Ptr8
+-- VPut and VGet defined under VCache.Types
 
--- | VPut represents an action that serializes a value as a string of
--- bytes and references to smaller values. Very large values can be
--- represented as a composition of other, slightly less large values.
-newtype VPut a = VPut { _vput :: VPutS -> IO (VPutR a) }
-data VPutS = VPutS 
-    { vput_children :: ![VRef_]
-    , vput_buffer   :: {-# UNPACK #-} !PtrIni
-    , vput_target   :: {-# UNPACK #-} !PtrLoc
-    , vput_limit    :: {-# UNPACK #-} !PtrEnd
-    }
-data VPutR r = VPutR
-    { vput_result :: r
-    , vput_state  :: !VPutS
-    }
 
--- | VGet represents an action that parses a value from a string of bytes
--- and values. Parser combinators are supported, and are of recursive
--- descent in style. It is possible to isolate a 'get' operation to a subset
--- of values and bytes, requiring a parser to consume exactly the requested
--- quantity of content.
+-- | Ensure that at least N bytes are available for storage without
+-- growing the underlying buffer. Use this before unsafePutWord8 
+-- and similar operations. If you reserve ahead of time to avoid
+-- dynamic allocations, be sure to account for 8 bytes per VRef plus
+-- a count of VRefs (as a varNat).
+reserve :: Int -> VPut ()
+reserve n = VPut $ \ s ->
+    let avail = vput_limit s `minusPtr` vput_target s in
+    if (avail >= n) then return (VPutR () s) 
+                    else VPutR () <$> grow n s 
+{-# INLINE reserve #-}
+
+grow :: Int -> VPutS -> IO VPutS
+grow n s =
+    let currSize = vput_limit s `minusPtr` vput_buffer s in
+    let bytesUsed = vput_target s `minusPtr` vput_buffer s in
+    let bytesNeeded = max (4 * currSize) (bytesUsed + n) in
+    reallocBytes (vput_buffer s) bytesNeeded >>= \ buffer' ->
+    let target' = buffer' `plusPtr` bytesUsed in
+    let limit' = buffer' `plusPtr` bytesNeeded in
+    return $ s
+        { vput_buffer = buffer'
+        , vput_target = target'
+        , vput_limit = limit'
+        }
+
+-- | Store an 8 bit word.
+putWord8 :: Word8 -> VPut ()
+putWord8 w8 = reserve 1 >> unsafePutWord8 w8
+{-# INLINE putWord8 #-}
+
+-- | Store an 8 bit word *assuming* enough space has been reserved.
+-- This can be used safely together with 'reserve'.
+unsafePutWord8 :: Word8 -> VPut ()
+unsafePutWord8 w8 = VPut $ \ s -> 
+    let pTgt = vput_target s in
+    poke pTgt w8 >>
+    let s' = s { vput_target = (pTgt `plusPtr` 1) } in
+    return (VPutR () s')
+{-# INLINE unsafePutWord8 #-}
+
+-- | Store a value. 
+--unsafePutVRef :: VRef a -> VPut ()
+
+    
+    
+
+
+{-
+    , putByte, getByte
+    , putVRef, getVRef
+    , putByteString, getByteString
+    , putByteStringLazy, getByteStringLazy
+    , getRemainingBytes, getRemainingBytesLazy
+    , putVarInt, getVarInt
+    , putChar, getChar
+    , putString, getString
+    , putStorable, getStorable
+    , putStorables, getStorables
+
+    , putWord16le, getWord16le
+    , putWord16be, getWord16be
+    , putWord32le, getWord32le
+    , putWord32be, getWord32be
+    , putWord64le, getWord64le
+    , putWord64be, getWord64be
+
+
+-- | isolate a parser to a subset of bytes and values. The parser
+-- must process its entire input (all bytes and values) or it will
+-- fail. If there are not enough available inputs or values, this 
+-- operation will also fail.
 --
--- VGet may fail with a very simple error string. Developers may wrap these
--- failure messages with better contextual information, e.g. about what is
--- expected.
-newtype VGet a = VGet { _vget :: VGetS -> IO (VGetR a) }
-data VGetS = VGetS 
-    { vget_children :: ![Address]
-    , vget_target   :: {-# UNPACK #-} !PtrLoc
-    , vget_limit    :: {-# UNPACK #-} !PtrEnd
-    }
-data VGetR r 
-    = VGetR r !VGetS
-    | VGetE String
+--      isolate nBytes nVRefs operation
+--
+isolate :: Int -> 
 
-instance Functor VPut where 
-    fmap f m = VPut $ \ s -> 
-        _vput m s >>= \ (VPutR r s') ->
-        return (VPutR (f r) s')
-    {-# INLINE fmap #-}
-instance Applicative VPut where
-    pure = return
-    (<*>) = ap
-    {-# INLINE pure #-}
-    {-# INLINE (<*>) #-}
-instance Monad VPut where
-    return r = VPut (\ s -> return (VPutR r s))
-    m >>= k = VPut $ \ s ->
-        _vput m s >>= \ (VPutR r s') ->
-        _vput (k r) s'
-    m >> k = VPut $ \ s ->
-        _vput m s >>= \ (VPutR _ s') ->
-        _vput k s'
-    {-# INLINE return #-}
-    {-# INLINE (>>=) #-}
-    {-# INLINE (>>) #-}
 
-instance Functor VGet where
-    fmap f m = VGet $ \ s ->
-        _vget m s >>= \ c ->
-        return $ case c of
-            VGetR r s' -> VGetR (f r) s'
-            VGetE msg -> VGetE msg 
-    {-# INLINE fmap #-}
-instance Applicative VGet where
-    pure = return
-    (<*>) = ap
-    {-# INLINE pure #-}
-    {-# INLINE (<*>) #-}
-instance Monad VGet where
-    fail msg = VGet (\ _ -> return (VGetE msg))
-    return r = VGet (\ s -> return (VGetR r s))
-    m >>= k = VGet $ \ s ->
-        _vget m s >>= \ c ->
-        case c of
-            VGetE msg -> return (VGetE msg)
-            VGetR r s' -> _vget (k r) s'
-    m >> k = VGet $ \ s ->
-        _vget m s >>= \ c ->
-        case c of
-            VGetE msg -> return (VGetE msg)
-            VGetR _ s' -> _vget k s'
-    {-# INLINE fail #-}
-    {-# INLINE return #-}
-    {-# INLINE (>>=) #-}
-    {-# INLINE (>>) #-}
-instance Alternative VGet where
-    empty = mzero
-    (<|>) = mplus
-    {-# INLINE empty #-}
-    {-# INLINE (<|>) #-}
-instance MonadPlus VGet where
-    mzero = fail "mzero"
-    mplus f g = VGet $ \ s ->
-        _vget f s >>= \ c ->
-        case c of
-            VGetE _ -> _vget g s
-            r -> return r
-    {-# INLINE mzero #-}
-    {-# INLINE mplus #-}
-    
+
+
 
     
 
+    , putByte, getByte
+    , putVRef, getVRef
+    , putByteCount, getByteCount
+    , putByteString, getByteString
+    , putVarNat, getVarNat
+    , putVarInt, getVarInt
+    , putChar, getChar
+    , putString, getString
+    , putStorable, getStorable
+    , putStorables, getStorables
+
+    , putWord16le, getWord16le
+    , putWord16be, getWord16be
+    , putWord32le, getWord32le
+    , putWord32be, getWord32be
+    , putWord64le, getWord64le
+    , putWord64be, getWord64be
+
+
+
+
+-}
 
