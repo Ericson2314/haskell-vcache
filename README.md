@@ -37,6 +37,8 @@ VCache uses LMDB with the `MDB_NOLOCK` flag, and provides its own concurrency co
 
 VCache is not a database. It's just a bunch of persistent variables and values. If developers want database features - such as queries, indices, views - those must be implemented in another layer, e.g. the application or library or framework. It is recommended that libraries or frameworks using VCache should always accept the VCache as an argument, rather than each creating its own file. Doing so improves hierarchical decomposition and the ability for values to easily be shared between subprograms.
 
-PVar transactions use optimistic concurrency. While this has many advantages, there is risk of a long stream of short transactions 'starving' a long running read-write transaction. If a PVar has many writers, developers might need to utilize external synchronization or cooperation patterns to reduce conflict. It wouldn't be difficult to model persistent queues and command patterns and so on. 
+PVars are not 'first class': VRef values may not contain PVars. While I could implement first class PVars, and even anonymous GC'd PVars, it isn't clear to me that doing so is a good idea. It would certainly hinder mobility of VRef values (ability to copy them to another cache, or replicate across a network), and it may discourage purely functional domain models. For now, I'm leaving this potential feature outside the scope of VCache. (Even so, VCache is much more expressive than acid-state, perdure, and TCache.)
 
-LMDB files are not especially portable. Endian-ness, filesystem block sizes, and so on may become significant issues.
+PVar transactions use optimistic concurrency. While this has many advantages, there is risk of a long stream of short transactions 'starving' a long running read-write transaction. If a PVar has many writers, developers may need to utilize external synchronization or cooperation patterns to reduce conflict. It shouldn't be difficult to model persistent queues and command patterns and so on. 
+
+LMDB files are not especially portable. Endian-ness, filesystem block sizes, and so on hinder porting files.
