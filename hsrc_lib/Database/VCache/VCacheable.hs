@@ -1,4 +1,4 @@
-{-# LANGUAGE ImpredicativeTypes #-}
+
 module Database.VCache.VCacheable
     ( VCacheable(..), VPut, VGet
     --, putWord8, putVRef

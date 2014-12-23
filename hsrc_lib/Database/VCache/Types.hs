@@ -1,5 +1,5 @@
 {-# LANGUAGE DeriveDataTypeable
-  , ImpredicativeTypes
+  , Rank2Types
   , GeneralizedNewtypeDeriving 
   #-}
 
@@ -7,10 +7,10 @@
 -- Lots of coupling... but VCache is one module.
 module Database.VCache.Types
     ( Address, HashVal
-    , VRef(..), Cached(..), VRef_
-    , Eph(..), Eph_, EphMap 
-    , PVar(..), PVar_
-    , PVEph(..), PVEph_, PVEphMap
+    , VRef(..), Cached(..), VRef_(..)
+    , Eph(..), Eph_(..), EphMap 
+    , PVar(..), PVar_(..)
+    , PVEph(..), PVEph_(..), PVEphMap
     , VTx(..)
     , VCache(..)
     , VCRoot(..)
@@ -70,7 +70,7 @@ data VRef a = VRef
     , vref_region :: !VCRoot                            -- ^ cache manager for this VRef
     } deriving (Typeable)
 instance Eq (VRef a) where (==) = (==) `on` vref_cache
-type VRef_ = forall a . VRef a -- VRef without type information. 
+newtype VRef_ = VRef_ (forall a . VRef a) -- VRef without type information. 
 
 -- idea: vrefNear :: (VCacheable a) => VRef b -> a -> VRef a
 
@@ -100,7 +100,7 @@ data Eph a = Eph
     , eph_type :: !TypeRep
     , eph_weak :: {-# UNPACK #-} !(Weak (MVar (Cached a)))
     }
-type Eph_ = forall a . Eph a -- forget the value type.
+newtype Eph_ = Eph_ (forall a . Eph a) -- forget the value type.
 type EphMap = IntMap [Eph_] --  bucket hash on Address & TypeRep
     -- note: the TypeRep must be included because otherwise a type
     -- that has too many overlapping representations would have very
@@ -164,9 +164,9 @@ data PVar a = PVar
     , pvar_write   :: !(a -> VPut ())
     } deriving (Typeable)
 instance Eq (PVar a) where (==) = (==) `on` pvar_content
-type PVar_ = forall a . PVar a
+newtype PVar_ = PVar_ (forall a . PVar a)
 data PVEph a = PVEph !TypeRep !(Weak (TVar a))
-type PVEph_ = forall a . PVEph a
+newtype PVEph_ = PVEph_ (forall a . PVEph a)
 type PVEphMap = Map ByteString PVEph_
 
 -- | A VCache represents a filesystem-backed address space.
