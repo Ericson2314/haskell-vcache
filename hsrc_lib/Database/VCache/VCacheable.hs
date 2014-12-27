@@ -1,7 +1,8 @@
 
 module Database.VCache.VCacheable
     ( VCacheable(..), VPut, VGet
-    --, putWord8, putVRef
+    , putWord8, putVRef
+    --, putWord8, putVRef, putVRef'
     --, getWord8, getVRef
 
     --, isolate
@@ -33,12 +34,14 @@ import Control.Monad
 
 import Data.Word
 import Data.Typeable
+import Data.IORef
 import Database.VCache.Types
 import Foreign.Ptr
 import Foreign.Storable
 import Foreign.Marshal.Alloc
 
 import Database.VCache.Types
+import Database.VCache.Impl
 
 -- thoughts: should I bother with unboxed tuples and such 
 -- to speed this up? I'm not sure. Let's leave low level
@@ -95,15 +98,17 @@ reserve n = VPut $ \ s ->
 
 grow :: Int -> VPutS -> IO VPutS
 grow n s =
-    let currSize = vput_limit s `minusPtr` vput_buffer s in
-    let bytesUsed = vput_target s `minusPtr` vput_buffer s in
-    let bytesNeeded = max (4 * currSize) (bytesUsed + n) in
-    reallocBytes (vput_buffer s) bytesNeeded >>= \ buffer' ->
-    let target' = buffer' `plusPtr` bytesUsed in
-    let limit' = buffer' `plusPtr` bytesNeeded in
+    readIORef (vput_buffer s) >>= \ pBuff ->
+    let currSize = vput_limit s `minusPtr` pBuff in
+    let bytesUsed = vput_target s `minusPtr` pBuff in
+    let bytesNeeded = (2 * currSize) + n in
+    reallocBytes pBuff bytesNeeded >>= \ pBuff' ->
+    -- (realloc will throw if it fails)
+    writeIORef (vput_buffer s) pBuff' >>
+    let target' = pBuff' `plusPtr` bytesUsed in
+    let limit' = pBuff' `plusPtr` bytesNeeded in
     return $ s
-        { vput_buffer = buffer'
-        , vput_target = target'
+        { vput_target = target'
         , vput_limit = limit'
         }
 
@@ -122,12 +127,31 @@ unsafePutWord8 w8 = VPut $ \ s ->
     return (VPutR () s')
 {-# INLINE unsafePutWord8 #-}
 
--- | Store a value. 
---unsafePutVRef :: VRef a -> VPut ()
+-- | Store a reference to a value. The value will be moved implicitly
+-- to the target address space, if necessary.
+putVRef :: VRef a -> VPut ()
+putVRef r = VPut $ \ s ->
+    let r' = mvref (vput_space s) r in
+    _putVRef s (VRef_ r')
+{-# INLINE putVRef #-}
 
-    
-    
+-- | Store a reference to a value that you know is already part of the
+-- destination address space. This operation fails if the value is not
+-- co-located with the destination, thus avoiding deep-copies but 
+-- allowing failure. 
+putVRef' :: VRef a -> VPut ()
+putVRef' r = VPut $ \ s ->
+    if (vput_space s == vref_space r) then _putVRef s (VRef_ r) else
+    fail $ "putVRef' argument is not from destination VCache" 
+{-# INLINE putVRef' #-}
 
+-- assuming destination and ref have same address space
+_putVRef :: VPutS -> VRef_ -> IO (VPutR ())
+_putVRef s r = 
+    let vs = vput_children s in
+    let s' = s { vput_children = (r:vs) } in
+    return (VPutR () s')
+{-# INLINE _putVRef #-}
 
 {-
     , putByte, getByte

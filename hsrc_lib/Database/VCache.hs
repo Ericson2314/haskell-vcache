@@ -4,6 +4,8 @@ module Database.VCache
     ( VRef, PVar
     , VCache
 
+    , mvref
+
 
     -- * Serialization
     -- , VPut, VGet
@@ -17,3 +19,8 @@ module Database.VCache
 
 import Database.VCache.Types
 import Database.VCache.VCacheable
+import Database.VCache.Impl
+
+
+
+

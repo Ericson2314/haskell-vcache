@@ -1,19 +1,16 @@
-{-# LANGUAGE DeriveDataTypeable
-  , Rank2Types
-  , GeneralizedNewtypeDeriving 
-  #-}
+{-# LANGUAGE DeriveDataTypeable, ExistentialQuantification, GeneralizedNewtypeDeriving #-}
 
 -- Internal file. Lots of types. 
--- Lots of coupling... but VCache is one module.
+-- Lots of coupling... but VCache is just one module.
 module Database.VCache.Types
-    ( Address, HashVal
+    ( Address
     , VRef(..), Cached(..), VRef_(..)
     , Eph(..), Eph_(..), EphMap 
     , PVar(..), PVar_(..)
-    , PVEph(..), PVEph_(..), PVEphMap
+    , PVEph(..), PVEphMap
     , VTx(..)
     , VCache(..)
-    , VCRoot(..)
+    , VSpace(..)
     , VPut(..), VPutS(..), VPutR(..)
     , VGet(..), VGetS(..), VGetR(..)
     ) where
@@ -36,8 +33,7 @@ import System.FileLock (FileLock)
 import Database.LMDB.Raw
 import Foreign.Ptr
 
-type Address = Word64
-type HashVal = Word64
+type Address = Word64 -- with '0' as special case
 
 -- | A VRef is an opaque reference to an immutable value stored in an
 -- auxiliary address space backed by the filesystem. This allows very
@@ -46,10 +42,8 @@ type HashVal = Word64
 --
 -- The API involving VRefs is conceptually pure.
 --
---     vref   :: (VCacheable a) => VCache -> a -> VRef a
---     deref  :: (VCacheable a) => VRef a -> a
---     region :: VRef a -> VCache
---     copyTo :: VRef a -> VCache -> VRef a
+--     vref     :: (VCacheable a) => VSpace -> a -> VRef a
+--     deref    :: (VCacheable a) => VRef a -> a
 -- 
 -- We are moving data around under the hood (via unsafePerformIO),
 -- but the client can pretend that VRef is just another value.
@@ -67,30 +61,12 @@ type HashVal = Word64
 data VRef a = VRef 
     { vref_addr   :: {-# UNPACK #-} !Address            -- ^ address within the cache
     , vref_cache  :: {-# UNPACK #-} !(MVar (Cached a))  -- ^ cached value & weak refs 
-    , vref_region :: !VCRoot                            -- ^ cache manager for this VRef
+    , vref_space  :: !VSpace                            -- ^ cache manager for this VRef
     } deriving (Typeable)
 instance Eq (VRef a) where (==) = (==) `on` vref_cache
-newtype VRef_ = VRef_ (forall a . VRef a) -- VRef without type information. 
+data VRef_ = forall a . VRef_ !(VRef a) -- VRef without type information.
 
 -- idea: vrefNear :: (VCacheable a) => VRef b -> a -> VRef a
-
--- IDEA:
--- 
--- Also support a ZCV 'slice' concept, as a special case involving
--- a zero cache, zero copy value Essentially, this might work like:
---
---  data ZCV = ZCV 
---   { zcv_addr :: {-# UNPACK #-} !Address
---   , zcv_weak :: {-# UNPACK #-} !(MVar ())
---   , zcv_region :: !VCRoot
---   }
---
--- readZCV :: ZCV -> VGet a -> a
---
--- Actually, a possibly more interesting variation is to use `VGet a`
--- directly in the type of a VRef. However, that would hinder Eq type
--- for VRefs, and thus might not be wortwhile.
-
 
 -- For every VRef we have in memory, we need an ephemeron in a table.
 -- This ephemeron table supports structure sharing, caching, and GC.
@@ -100,7 +76,7 @@ data Eph a = Eph
     , eph_type :: !TypeRep
     , eph_weak :: {-# UNPACK #-} !(Weak (MVar (Cached a)))
     }
-newtype Eph_ = Eph_ (forall a . Eph a) -- forget the value type.
+data Eph_ = forall a . Eph_ (Eph a) -- forget the value type.
 type EphMap = IntMap [Eph_] --  bucket hash on Address & TypeRep
     -- note: the TypeRep must be included because otherwise a type
     -- that has too many overlapping representations would have very
@@ -138,69 +114,60 @@ data Cached a = Cached
 --  
    
 
--- | A PVar is a persistent variable associated with a VCache and named
--- by a short bytestring. PVars can be manipulated transactionally, and
--- these transactions may also integrate with STM TVars. 
+-- | A PVar is a persistent variable associated with a VCache. PVars are
+-- second class: named by bytestrings in a filesystem-like namespace,
+-- but not themselves cacheable.
 --
 --     loadPVarIO :: (VCacheable a) => VCache -> ByteString -> a -> IO (PVar a)
---     loadPVar   :: (VCacheable a) => VCache -> ByteString -> a -> VTxn (PVar a)
+--     loadPVar   :: (VCacheable a) => VCache -> ByteString -> a -> VTx (PVar a)
 --     readPVarIO :: PVar a -> IO a
---     readPVar   :: PVar a -> VTxn a
---     writePVar  :: PVar a -> a -> VTxn ()
---     runVTxn    :: VTxn a -> IO a
+--     readPVar   :: PVar a -> VTx a
+--     writePVar  :: PVar a -> a -> VTx ()
+--     runVTx     :: VTx a -> IO a
 --
--- A PVar is only read once, when first loaded (or if GC'd since prior load).
--- The associated value is kept in memory, and is cheap to access. PVars do
--- not support structure sharing - e.g. if you have a hundred PVars each with
--- the same megabyte value, storage costs will be over one hundred megabytes.
+-- The PVar type `a` does not use structure sharing or memcaching. The full
+-- value is loaded into Haskell memory, and updated by writer transactions.
+-- To take full advantage of VCache, developers must use VRefs in type `a`,
+-- and keep `a` itself relatively small.
 --
--- The recommendation is to have PVars as thin wrappers around VRefs - thin
--- enough that the serialization cost is low.
+-- Note: PVar names should be short. Names smaller than 128 characters will
+-- be used directly, but larger names may be hashed and truncated, at risk
+-- of accidental collisions and security holes if clients control names. For
+-- most use-cases, this should be a non-issue.
 --
 data PVar a = PVar
     { pvar_content :: !(TVar a)
-    , pvar_name    :: !ByteString -- full name (including path)
-    , pvar_region  :: !VCRoot     -- 
+    , pvar_name    :: !ByteString -- full name
+    , pvar_space   :: !VSpace     -- 
     , pvar_write   :: !(a -> VPut ())
     } deriving (Typeable)
 instance Eq (PVar a) where (==) = (==) `on` pvar_content
-newtype PVar_ = PVar_ (forall a . PVar a)
-data PVEph a = PVEph !TypeRep !(Weak (TVar a))
-newtype PVEph_ = PVEph_ (forall a . PVEph a)
-type PVEphMap = Map ByteString PVEph_
+data PVar_ = forall a . PVar_ !(PVar a)
+data PVEph = forall a . PVEph !TypeRep {-# UNPACK #-} !(Weak (TVar a))
+type PVEphMap = Map ByteString PVEph
 
--- | A VCache represents a filesystem-backed address space.
+--     dropPVar   :: VCache -> ByteString -> VTx ()
+
+
+-- | VCache supports a filesystem-backed address space with persistent 
+-- variables. The address space can be much larger than system memory, 
+-- but the active working set at any given moment should be smaller than
+-- system memory. The persistent variables are named by bytestring, and
+-- support a filesystem directory-like structure to easily decompose a
+-- persistent application into persistent subprograms.
 --
--- This allows an address space much larger than system memory to be
--- efficiently utilized... at least for applications where the working
--- set is much smaller than total storage requirements. Also, VCache
--- supports persistent variables with atomic updates, and thus serves
--- as an alternative to the acid-state package. 
---
--- A given VCache file may only be opened by one process at a time, and
--- only once within that process. This is weakly enforced by lockfile.
---
---
--- It is safe to use more than one VCache object, so long as each is
--- backed by a different file. This might be motivated for similar 
--- roles as a tmpfs - i.e. if you're just using VCache for large 
--- volatile storage that can be deleted when the process finishes. 
--- However, there should rarely be any need to do so. LMDB scales
--- very well.
---
--- Usage Note: If a library or framework uses a VCache, it should 
--- always take a VCache as an argument rather than create its own.
--- This works well with VCache's hierarchical decomposition model,
--- and enables efficient sharing between libraries or frameworks.
---
--- See PVar and VRef for more information.
+-- See VSpace, VRef, and PVar for more information.
 data VCache = VCache
-    { vcache_root :: !VCRoot 
-    , vcache_path :: ByteString 
+    { vcache_root :: !VSpace 
+    , vcache_path :: !ByteString
     } deriving (Eq)
 
-data VCRoot = VCRoot
-    { vcache_lockfile   :: {-# UNPACK #-} !FileLock -- prevent opening VCache twice
+-- | VSpace is the abstract address space used by VCache. VSpace allows
+-- construction of VRef values, and may be accessed via VRef or VCache.
+-- Unlike the whole VCache object, VSpace does not permit construction of
+-- PVars. From the client's perspective, VSpace is just an opaque handle.
+data VSpace = VSpace
+    { vcache_lockfile   :: {-# UNPACK #-} !FileLock -- block concurrent use of VCache file
 
     -- LMDB contents. 
     , vcache_db_env     :: !MDB_env
@@ -212,7 +179,6 @@ data VCRoot = VCRoot
 
     , vcache_mem_vrefs  :: {-# UNPACK #-} !(IORef EphMap) -- track VRefs in memory
     , vcache_mem_pvars  :: {-# UNPACK #-} !(IORef PVEphMap) -- track PVars in memory
-   
 
     -- requested weight limit for cached values
     -- , vcache_weightlim  :: {-# UNPACK #-} !(IORef Int)
@@ -220,14 +186,13 @@ data VCRoot = VCRoot
     -- share persistent variables for safe STM
 
     -- Further, I need...
-    --   a FileLock
     --   a thread performing writes and incremental GC
     --   a channel to talk to that thread
     --   queue of MVars waiting on synchronization/flush.
 
     }
 
-instance Eq VCRoot where (==) = (==) `on` vcache_lockfile
+instance Eq VSpace where (==) = (==) `on` vcache_lockfile
 
 -- action: write a value to the database.
 {-
@@ -350,15 +315,21 @@ data WriteVal = WriteVal
 -- | The VTx transactions build upon STM, and allow use of arbitrary
 -- PVars in addition to STM resources. 
 --
--- The PVars may originate from multiple VCaches. However, in that
--- case atomicity cannot be guaranteed because the program might crash
--- between updating two VCaches. Transactions are atomic only if at 
--- most one VCache is involved.
+-- VTx transactions on a single VCache can support the full atomic,
+-- consistent, isolated, and durable (ACID) properties. However, 
+-- durability is optional, and non-durable transactions may observe 
+-- data that has been committed but is not fully persisted to disk.
+-- Essentially, durability involves an extra wait (before returning)
+-- for `fsync` to disk, and only durable transactions will wait.
 --
--- Durability is optional. Asking for a durable transaction just means
--- you wait for all the VCaches to finish writing and synching before
--- you return from the transaction request. If you don't write, the
--- durable transactions will not perform any synch.
+-- A transaction involving PVars from multiple VCache objects is
+-- possible, but full ACID is not supported: if the Haskell process
+-- crashes between updating the different underlying files, they
+-- may become mutually inconsistent (though will still have internal
+-- consistency). 
+-- 
+-- VCache will aggregate multiple transactions that occur around
+-- the same time, with the goal of amortizing synchronization costs.
 -- 
 newtype VTx a = VTx { _vtx :: StateT [PVar_] STM a }
     deriving (Monad, Functor, Applicative, Alternative, MonadPlus)
@@ -367,7 +338,6 @@ newtype VTx a = VTx { _vtx :: StateT [PVar_] STM a }
     -- When the transaction completes, this list will be used to
     -- alert the writer threads. There may be an optional further
     -- wait for all writes to complete.
-
 
 type Ptr8 = Ptr Word8
 type PtrIni = Ptr8
@@ -383,11 +353,17 @@ type PtrLoc = Ptr8
 -- `reserve` to allocate enough bytes.
 newtype VPut a = VPut { _vput :: VPutS -> IO (VPutR a) }
 data VPutS = VPutS 
-    { vput_children :: ![VRef_]
-    , vput_buffer   :: {-# UNPACK #-} !PtrIni
+    { vput_space    :: !VSpace
+    , vput_children :: ![VRef_]
+    , vput_buffer   :: !(IORef PtrIni)
     , vput_target   :: {-# UNPACK #-} !PtrLoc
     , vput_limit    :: {-# UNPACK #-} !PtrEnd
     }
+    -- note: vput_buffer is an IORef mostly to simplify error handling.
+    --  On error, we'll need to free the buffer. However, it may be 
+    --  reallocated many times during serialization of a large value,
+    --  so we need easy access to the final value.
+
 data VPutR r = VPutR
     { vput_result :: r
     , vput_state  :: !VPutS
