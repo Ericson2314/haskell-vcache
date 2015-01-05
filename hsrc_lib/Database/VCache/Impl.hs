@@ -27,8 +27,3 @@ mvref sp ref =
 _deepCopy :: VSpace -> VRef a -> VRef a
 _deepCopy dst src = error "todo: mvref"
 
-
-
-
-
-

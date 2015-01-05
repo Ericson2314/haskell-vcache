@@ -54,7 +54,7 @@ type Address = Word64 -- with '0' as special case
 --   Under the hood, `mkWeakMVar` is used for an ephemeron table.
 -- * Values are cached such that multiple derefs in a short period
 --   of time will efficienty return the same Haskell value. Caching
---   may be voluntarily bypassed. 
+--   may be bypassed or controlled by developers.
 -- * Structure sharing. Within a cache, VRefs are equal iff their 
 --   values are equal. (VRefs from different caches are not equal.)
 --
@@ -62,6 +62,7 @@ data VRef a = VRef
     { vref_addr   :: {-# UNPACK #-} !Address            -- ^ address within the cache
     , vref_cache  :: {-# UNPACK #-} !(MVar (Cached a))  -- ^ cached value & weak refs 
     , vref_space  :: !VSpace                            -- ^ cache manager for this VRef
+    , vref_parse  :: !(VGet a)                          -- ^ parser for this VRef
     } deriving (Typeable)
 instance Eq (VRef a) where (==) = (==) `on` vref_cache
 data VRef_ = forall a . VRef_ !(VRef a) -- VRef without type information.
@@ -158,8 +159,8 @@ type PVEphMap = Map ByteString PVEph
 --
 -- See VSpace, VRef, and PVar for more information.
 data VCache = VCache
-    { vcache_root :: !VSpace 
-    , vcache_path :: !ByteString
+    { vcache_space :: !VSpace 
+    , vcache_path  :: !ByteString
     } deriving (Eq)
 
 -- | VSpace is the abstract address space used by VCache. VSpace allows
@@ -252,10 +253,11 @@ data WriteVal = WriteVal
 --
 --     Instead, I need to track reader threads and prevent
 --     writers from operating while readers exist for two
---     generations back. (Or was it three?)
+--     generations back. (Or was it three? Need to review
+--     LMDB code.)
 --
 --     Thus: the writer waits on readers, but with double or
---     triple buffering for pipeline concurrency.
+--     triple buffering for concurrency.
 --
 --  THREADS
 --   
@@ -286,31 +288,16 @@ data WriteVal = WriteVal
 --
 --  PVARS
 --
---   With PVars, it seems feasible to simply send a 'write batch' after
---   every transaction, with an optional sync request. I think this will
---   be much easier than working with the VRefs. I will need to ensure 
---   that VRefs are properly written before PVar's current value.
+--   With PVars, it seems feasible to simply deliver a 'write batch' for
+--   every transaction, with an optional sync request. Multiple batches
+--   involving one PVar can be combined into a single write at the LMDB
+--   layer. For consistency, I'll need to track what each transaction has
+--   written to the PVar, rather than using a separate read on the PVars.
 --
---   I can probably run a quick check to test whether each PVar has changed.
+--   PVars will use STM variables under the hood, allowing interaction with
+--   other STM variables at runtime. There is also no waiting on the write
+--   thread unless the PVar transaction must be durable.
 --
---   Simple command-pattern or queue to talk to this thread.
---   Lots of writes merge into one larger transaction. 
---   Synchronization at lower rate than writes, 
---     except where otherwise requested.
---
---   Avoid waiting on this write thread for normal interactions.
---     can't wait on current writer for a new VRef address?
---
---     In this case, I'll need to track pending writes, so 
---     that I can pick the Address before storing anything to
---     it. And I might need to double-buffer this.
---
---   No waiting on the write thread for normal interactions.
---   Write thread can write STM-layer transactional snapshots.
---   May wait on writer only to ensure durable transactions.
---
-
-
 
 -- | The VTx transactions build upon STM, and allow use of arbitrary
 -- PVars in addition to STM resources. 
@@ -320,24 +307,27 @@ data WriteVal = WriteVal
 -- durability is optional, and non-durable transactions may observe 
 -- data that has been committed but is not fully persisted to disk.
 -- Essentially, durability involves an extra wait (before returning)
--- for `fsync` to disk, and only durable transactions will wait.
+-- for `fsync` to disk. Only durable transactions will wait.
 --
 -- A transaction involving PVars from multiple VCache objects is
 -- possible, but full ACID is not supported: if the Haskell process
--- crashes between updating the different underlying files, they
--- may become mutually inconsistent (though will still have internal
--- consistency). 
+-- crashes between persisting the different underlying files, they
+-- will become mutually inconsistent (though will still have internal
+-- consistency).
 -- 
 -- VCache will aggregate multiple transactions that occur around
--- the same time, with the goal of amortizing synchronization costs.
+-- the same time, amortizing synchronization costs for bursts of
+-- updates (common in many domains).
 -- 
-newtype VTx a = VTx { _vtx :: StateT [PVar_] STM a }
+newtype VTx a = VTx { _vtx :: StateT WriteList STM a }
     deriving (Monad, Functor, Applicative, Alternative, MonadPlus)
-    -- Internally, I'm just tracking a list of PVars written. 
-    --
-    -- When the transaction completes, this list will be used to
-    -- alert the writer threads. There may be an optional further
-    -- wait for all writes to complete.
+    -- basically, just an STM transaction that additionally tracks
+    -- writes to PVars involving many VCache resources. This list 
+    -- is delivered to the writer threads only if the transaction
+    -- commits. Serialization is lazy to better support batching. 
+
+type WriteList  = [(VSpace, WriteBatch)]           
+type WriteBatch = Map ByteString (VPut ()) 
 
 type Ptr8 = Ptr Word8
 type PtrIni = Ptr8
@@ -403,6 +393,7 @@ data VGetS = VGetS
     { vget_children :: ![Address]
     , vget_target   :: {-# UNPACK #-} !PtrLoc
     , vget_limit    :: {-# UNPACK #-} !PtrEnd
+    , vget_space    :: !VSpace
     }
 data VGetR r 
     = VGetR r !VGetS
