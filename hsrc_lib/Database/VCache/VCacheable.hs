@@ -250,15 +250,18 @@ putStorable a =
 {-# INLINE putStorable #-}
 
 -- | Put an arbitrary integer in a 'varint' format associated with
--- Google protocol buffers. This takes one byte for values -64..63,
--- two bytes for -8k..8k, three bytes for -1M..1M, etc. and is more
--- efficient than recording a bytecount followed by the input for up
--- to eight bytes. This is especially useful if you can arrange the
--- inputs to mostly be small integers.
+-- Google protocol buffers with zigzag encoding of negative numbers.
+-- This takes one byte for values -64..63, two bytes for -8k..8k, 
+-- three bytes for -1M..1M, etc.. Very useful if most numbers are
+-- near 0.
 putVarInt :: Integer -> VPut ()
-putVarInt n | (n < 0)   = _putVarNat $ abs $ 1 + (n * 2)
-            | otherwise = _putVarNat (n * 2)
+putVarInt = putVarNat . zigZag
 {-# INLINE putVarInt #-}
+
+zigZag :: Integer -> Integer
+zigZag n | (n < 0)   = (negate n * 2) - 1
+         | otherwise = (n * 2)
+{-# INLINE zigZag #-}
 
 -- | Put an arbitrary non-negative integer in 'varint' format associated
 -- with Google protocol buffers. This takes one byte for values 0..127,
@@ -480,6 +483,7 @@ peekByte = peek
 -- alignment issues.
 getStorable :: (Storable a) => VGet a
 getStorable = _getStorable undefined
+{-# INLINE getStorable #-}
 
 _getStorable :: (Storable a) => a -> VGet a
 _getStorable _dummy = 
@@ -491,6 +495,7 @@ _getStorable _dummy =
             a <- peek pA
             let s' = s { vget_target = pTgt `plusPtr` n }
             return (VGetR a s')
+{-# INLINE _getStorable #-}
 
 
 -- | Get an integer represented in the Google protocol buffers zigzag
@@ -511,58 +516,30 @@ unZigZag n =
 -- buffers 'varint' encoding, e.g. as produced by 'putVarNat'.
 getVarNat :: VGet Integer
 getVarNat = getVarNat' 0
+{-# INLINE getVarNat #-}
 
 -- getVarNat' uses accumulator
 getVarNat' :: Integer -> VGet Integer
 getVarNat' !n =
     getWord8 >>= \ w ->
-    if (w < 128) then return $! ((128*n) + fromIntegral w) else
-    getVarNat' ((128*n) + fromIntegral (w - 128))
+    let n' = (128 * n) + fromIntegral (w .&. 0x7f) in
+    if (w < 128) then return $! n'
+                 else getVarNat' n'
 
 {-
     , putByteString, getByteString
     , putByteStringLazy, getByteStringLazy
     , getRemainingBytes, getRemainingBytesLazy
-    , putVarInt, getVarInt
     , putChar, getChar
     , putString, getString
-    , putStorable, getStorable
     , putStorables, getStorables
 
-    , putWord16le, getWord16le
-    , putWord16be, getWord16be
-    , putWord32le, getWord32le
-    , putWord32be, getWord32be
-    , putWord64le, getWord64le
-    , putWord64be, getWord64be
-
-
---
-isolate :: Int -> 
-
-    
-
-    , putByte, getByte
-    , putVRef, getVRef
     , putByteCount, getByteCount
     , putByteString, getByteString
     , putVarNat, getVarNat
     , putVarInt, getVarInt
     , putChar, getChar
     , putString, getString
-    , putStorable, getStorable
-    , putStorables, getStorables
-
-    , putWord16le, getWord16le
-    , putWord16be, getWord16be
-    , putWord32le, getWord32le
-    , putWord32be, getWord32be
-    , putWord64le, getWord64le
-    , putWord64be, getWord64be
-
-
-
-
 -}
 
 
