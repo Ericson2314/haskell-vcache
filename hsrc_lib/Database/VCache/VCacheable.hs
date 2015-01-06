@@ -46,44 +46,17 @@ import Foreign.Marshal.Utils (copyBytes)
 
 import qualified Data.List as L
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as LBS
 
 import Database.VCache.Types
 import Database.VCache.Impl
 
--- | To be utilized with VCache, a value must be serializable as a 
--- simple sequence of binary data and child VRefs. Also, to put then
--- get a value must result in equivalent values. Further, values are
--- Typeable to support memory caching of values loaded.
--- 
--- Under the hood, structured data is serialized as the pair:
---
---    (ByteString,[VRef])
---
--- This separation is mostly to simplify garbage collection. However,
--- it also means there is no risk of reading VRef addresses as binary
--- data, nor vice versa. Serialized values may have arbitrary size.
---
--- Developers must ensure that `get` on the output of `put` will return
--- an equivalent value. If a data type isn't stable, developers should
--- consider adding some version information (cf. SafeCopy package) and
--- ensuring backwards compatibility of `get`.
--- 
-class (Typeable a) => VCacheable a where 
-    -- | Serialize a value as a stream of bytes and value references. 
-    put :: a -> VPut ()
-
-    -- | Parse a value from its serialized representation into memory.
-    get :: VGet a
 
 -- VPut and VGet defined in VCache.Types
 
-
 -- | Ensure that at least N bytes are available for storage without
 -- growing the underlying buffer. Use this before unsafePutWord8 
--- and similar operations. If you reserve ahead of time to avoid
--- dynamic allocations, be sure to account for 8 bytes per VRef plus
--- a count of VRefs (as a varNat).
+-- and similar operations. If the buffer must grow, it will grow
+-- exponentially to ensure amortized constant allocation costs.
 reserve :: Int -> VPut ()
 reserve n = VPut $ \ s ->
     let avail = vput_limit s `minusPtr` vput_target s in
@@ -96,7 +69,8 @@ grow n s =
     readIORef (vput_buffer s) >>= \ pBuff ->
     let currSize = vput_limit s `minusPtr` pBuff in
     let bytesUsed = vput_target s `minusPtr` pBuff in
-    let bytesNeeded = (2 * currSize) + n in
+    -- heuristic exponential growth
+    let bytesNeeded = (2 * currSize) + n + 1000 in 
     reallocBytes pBuff bytesNeeded >>= \ pBuff' ->
     -- (realloc will throw if it fails)
     writeIORef (vput_buffer s) pBuff' >>
@@ -236,7 +210,11 @@ putWord64be w = reserving 8 $ VPut $ \ s -> do
 {-# INLINE putWord64be #-}
 
 -- | Put a Data.Storable value, using intermediate storage to
--- ensure alignment when serializing argument.
+-- ensure alignment when serializing argument. Note that this
+-- shouldn't have any pointers, since serialized pointers won't
+-- usually be valid when loaded later. Also, the storable type
+-- shouldn't have any gaps (unassigned bytes); uninitialized
+-- bytes may interfere with structure sharing in VCache.
 putStorable :: (Storable a) => a -> VPut () 
 putStorable a = 
     let n = sizeOf a in
@@ -255,7 +233,7 @@ putStorable a =
 -- three bytes for -1M..1M, etc.. Very useful if most numbers are
 -- near 0.
 putVarInt :: Integer -> VPut ()
-putVarInt = putVarNat . zigZag
+putVarInt = _putVarNat . zigZag
 {-# INLINE putVarInt #-}
 
 zigZag :: Integer -> Integer
@@ -370,10 +348,6 @@ getVRef = VGet $ \ s ->
             r <- addr2vref (vget_space s) c
             return (VGetR r s')
 {-# INLINE getVRef #-}
-
--- load a VRef from an address. Tightly coupled to VCache implementation.
-addr2vref :: (VCacheable a) => VSpace -> Address -> IO (VRef a)
-addr2vref = error "todo: addr2vref"
 
 -- | Read words of size 16, 32, or 64 in little-endian or big-endian.
 getWord16le, getWord16be :: VGet Word16
@@ -528,18 +502,10 @@ getVarNat' !n =
 
 {-
     , putByteString, getByteString
-    , putByteStringLazy, getByteStringLazy
-    , getRemainingBytes, getRemainingBytesLazy
+    , getRemainingBytes 
     , putChar, getChar
     , putString, getString
     , putStorables, getStorables
-
-    , putByteCount, getByteCount
-    , putByteString, getByteString
-    , putVarNat, getVarNat
-    , putVarInt, getVarInt
-    , putChar, getChar
-    , putString, getString
 -}
 
 

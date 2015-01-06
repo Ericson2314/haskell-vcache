@@ -5,7 +5,7 @@
 module Database.VCache.Types
     ( Address
     , VRef(..), Cached(..), VRef_(..)
-    , Eph(..), Eph_(..), EphMap 
+    , Eph(..), EphMap 
     , PVar(..), PVar_(..)
     , PVEph(..), PVEphMap
     , VTx(..)
@@ -13,6 +13,7 @@ module Database.VCache.Types
     , VSpace(..)
     , VPut(..), VPutS(..), VPutR(..)
     , VGet(..), VGetS(..), VGetR(..)
+    , VCacheable(..)
     ) where
 
 import Data.Word
@@ -72,21 +73,15 @@ data VRef_ = forall a . VRef_ !(VRef a) -- VRef without type information.
 -- For every VRef we have in memory, we need an ephemeron in a table.
 -- This ephemeron table supports structure sharing, caching, and GC.
 -- I model this ephemeron by use of `mkWeakMVar`.
-data Eph a = Eph
+data Eph = forall a . Eph
     { eph_addr :: {-# UNPACK #-} !Address
     , eph_type :: !TypeRep
     , eph_weak :: {-# UNPACK #-} !(Weak (MVar (Cached a)))
     }
-data Eph_ = forall a . Eph_ (Eph a) -- forget the value type.
-type EphMap = IntMap [Eph_] --  bucket hash on Address & TypeRep
-    -- note: the TypeRep must be included because otherwise a type
-    -- that has too many overlapping representations would have very
-    -- deep buckets. Alternatively, I could use 
-    --
-    --     Map Address (Map TypeRep Eph_))
-    --
-    -- but, for now, I'll assume that GC needs to process the whole
-    -- map anyway, and so extracting live addresses should be easy.
+type EphMap = IntMap [Eph] --  bucket hash on Address & TypeRep
+    -- type must be part of hash, or we'll have too many collisions
+    -- where values tend to overlap in representation, e.g. the 
+    -- 'empty' values.
 
 -- Every VRef has a hole (via MVar) to potentially record a cached
 -- value without loading it from LMDB. A little extra information
@@ -94,7 +89,7 @@ type EphMap = IntMap [Eph_] --  bucket hash on Address & TypeRep
 data Cached a = Cached 
     { cached_value  :: a
     , cached_gcbits :: {-# UNPACK #-} !Word16
-    }
+    } 
 -- gcbits:
 --   bit 0: set 0 when read, set 1 by every GC pass
 --   bit 1,2,3,4,5: log scale weight estimate
@@ -443,5 +438,32 @@ instance MonadPlus VGet where
             r -> return r
     {-# INLINE mzero #-}
     {-# INLINE mplus #-}
+
+
+-- | To be utilized with VCache, a value must be serializable as a 
+-- simple sequence of binary data and child VRefs. Also, to put then
+-- get a value must result in equivalent values. Further, values are
+-- Typeable to support memory caching of values loaded.
+-- 
+-- Under the hood, structured data is serialized as the pair:
+--
+--    (ByteString,[VRef])
+--
+-- This separation is mostly to simplify garbage collection. However,
+-- it also means there is no risk of reading VRef addresses as binary
+-- data, nor vice versa. 
+--
+-- Developers must ensure that `get` on the output of `put` will return
+-- an equivalent value. If a data type isn't stable, developers should
+-- consider adding some version information (cf. SafeCopy package) and
+-- ensuring backwards compatibility of `get`.
+-- 
+class (Typeable a) => VCacheable a where 
+    -- | Serialize a value as a stream of bytes and value references. 
+    put :: a -> VPut ()
+
+    -- | Parse a value from its serialized representation into memory.
+    get :: VGet a
+
 
 
