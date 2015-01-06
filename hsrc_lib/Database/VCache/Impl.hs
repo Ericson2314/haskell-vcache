@@ -19,13 +19,10 @@ import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.List as L
 
-
 import System.Mem.Weak (Weak)
 import qualified System.Mem.Weak as Weak
 import System.IO.Unsafe
 import Unsafe.Coerce
-
-
 
 -- | Move a VRef into a target destination space. This will exit fast
 -- if the VRef is already in the target location, otherwise performs a
@@ -59,18 +56,18 @@ addr2vref space addr =
         }
 {-# INLINE addr2vref #-}
 
--- | Load or Create the cache for a given space, type, address triple.
+-- | Load or Create the cache for a given location and type.
 --
--- This uses unsafePerformIO under the hood to support the infinite cache
--- illusion. Garbage collection managed by a separate thread.
+-- Other than the GC operation, this is the only function that should 
+-- touch vcache_mem_vrefs. It is both a reader and a writer.
 loadMemCache :: (Typeable a) => a -> VSpace -> Address -> IO (MVar (Cached a))
 loadMemCache _dummy space addr = atomicModifyIORef mcrf loadCache where
     mcrf = vcache_mem_vrefs space
     typa = typeOf _dummy
-    hkey = fromIntegral $ _hty typa + (addr * 4231)
+    hkey = fromIntegral $ _hty typa + (addr * 6679)
     match eph = (addr == eph_addr eph) -- must match address
              && (typa == eph_type eph) -- must match type
-    getCache = unsafeDupablePerformIO . Weak.deRefWeak . _ephWeak
+    getCache = unsafeDupablePerformIO . Weak.deRefWeak . _unsafeEphWeak
     loadCache mc =
         let oldCache = IntMap.lookup hkey mc >>= L.find match >>= getCache in
         case oldCache of
@@ -80,20 +77,26 @@ loadMemCache _dummy space addr = atomicModifyIORef mcrf loadCache where
         c <- newEmptyMVar
         wc <- mkWeakMVar c (return ())
         let eph = Eph { eph_addr = addr, eph_type = typa, eph_weak = wc }
-        let addEph = Just . maybe [eph] (eph:)
+        let addEph = Just . (eph:) . maybe [] id
         let mc' = IntMap.alter addEph hkey mc 
         return (mc',c)
 
--- this is a bit of a hack... it is unsafe in general, but we know it is safe
--- for loadMemCache because we've already matched on address and typerep.
-_ephWeak :: Eph -> Weak (MVar (Cached a))
-_ephWeak (Eph { eph_weak = w }) = _cw w 
+-- this is a bit of a hack... it is unsafe in general, since
+-- Eph doesn't track the type `a`. We'll coerce it, assuming
+-- the type is known in context.
+_unsafeEphWeak :: Eph -> Weak (MVar (Cached a))
+_unsafeEphWeak (Eph { eph_weak = w }) = _unsafeCoerceWeakCache w 
+{-# INLINE _unsafeEphWeak #-}
 
-_cw :: Weak (MVar (Cached b)) -> Weak (MVar (Cached a))
-_cw = unsafeCoerce
+-- unsafe coercion; used in contexts where we know type 
+-- (via matching TypeRep and location); similar to Data.Dynamic.
+_unsafeCoerceWeakCache :: Weak (MVar (Cached b)) -> Weak (MVar (Cached a))
+_unsafeCoerceWeakCache = unsafeCoerce
+{-# INLINE _unsafeCoerceWeakCache #-}
 
--- simple hash for a typerep.
+-- simple hash for a typerep. I'm going to assume the hash is
+-- good enough already, so I'm just combining the parts.
 _hty :: TypeRep -> Word64
-_hty (TypeRep (Fingerprint a b) _ _) = (a * 6679) + b
-    
+_hty (TypeRep (Fingerprint a b) _ _) = (a * 35983) + b
+
 
