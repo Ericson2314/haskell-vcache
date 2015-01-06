@@ -1,9 +1,10 @@
 {-# LANGUAGE BangPatterns #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Database.VCache.VCacheable
     ( VCacheable(..), VPut, VGet
 
-    -- * Basic Writers
+    -- * Prim Writers
     , putVRef, putVRef'
     , putWord8
     , putWord16le, putWord16be
@@ -12,8 +13,9 @@ module Database.VCache.VCacheable
     , putStorable
     , putVarNat, putVarInt
     , reserve, unsafePutWord8
+    , putByteString, putByteStringLazy
     
-    -- * Basic Readers
+    -- * Prim Readers
     , getVRef
     , getWord8
     , getWord16le, getWord16be
@@ -21,31 +23,34 @@ module Database.VCache.VCacheable
     , getWord64le, getWord64be
     , getStorable
     , getVarNat, getVarInt
+    , getByteString, getByteStringLazy
+    , isEmpty
+
+    -- * Parser Combinators
     , isolate
-{-
-    , putByteString, getByteString
-    , putByteStringLazy, getByteStringLazy
-    , getRemainingBytes, getRemainingBytesLazy
-    , putChar, getChar
-    , putString, getString
--}
+    , label
+    , lookAhead, lookAheadM, lookAheadE
     ) where
 
 import Control.Applicative
 import Control.Monad
 
 import Data.Bits
+import Data.Char
 import Data.Word
 import Data.Typeable
 import Data.IORef
 import Database.VCache.Types
-import Foreign.Ptr
-import Foreign.Storable
-import Foreign.Marshal.Alloc
+import Foreign.Ptr (plusPtr,minusPtr,castPtr,Ptr)
+import Foreign.Storable (Storable(..))
+import Foreign.Marshal.Alloc (alloca,mallocBytes,reallocBytes,finalizerFree)
 import Foreign.Marshal.Utils (copyBytes)
+import Foreign.ForeignPtr (newForeignPtr,withForeignPtr)
 
 import qualified Data.List as L
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Lazy as LBS
 
 import Database.VCache.Types
 import Database.VCache.Impl
@@ -268,6 +273,28 @@ _varNatBytes' out n =
     let (q,r) = n `divMod` 128 in
     let byte = 128 + fromIntegral r in
     _varNatBytes' (byte:out) q 
+
+-- | Put the contents of a bytestring directly. Unlike the 'put' method for
+-- bytestrings, this does not include size information; just raw bytes.
+putByteString :: BS.ByteString -> VPut ()
+putByteString s = reserving (BS.length s) (_putByteString s)
+{-# INLINE putByteString #-}
+
+-- | Put contents of a lazy bytestring directly. Unlike the 'put' method for
+-- bytestrings, this does not include size information; just raw bytes.
+putByteStringLazy :: LBS.ByteString -> VPut ()
+putByteStringLazy s = reserving (fromIntegral $ LBS.length s) (mapM_ _putByteString (LBS.toChunks s))
+{-# INLINE putByteStringLazy #-}
+
+-- put a byte string, assuming enough space has been reserved already.
+-- this uses a simple memcpy to the target space.
+_putByteString :: BS.ByteString -> VPut ()
+_putByteString (BSI.PS fpSrc p_off p_len) = 
+    VPut $ \ s -> withForeignPtr fpSrc $ \ pSrc -> do
+        let pDst = vput_target s
+        copyBytes pDst (pSrc `plusPtr` p_off) p_len
+        let s' = s { vput_target = (pDst `plusPtr` p_len) }
+        return (VPutR () s')
 
 -- TODO: VCacheable for Char, ByteString, etc.
 
@@ -500,110 +527,192 @@ getVarNat' !n =
     if (w < 128) then return $! n'
                  else getVarNat' n'
 
-{-
-    , putByteString, getByteString
-    , getRemainingBytes 
-    , putChar, getChar
-    , putString, getString
-    , putStorables, getStorables
--}
+-- | Load a number of bytes from the underlying object. A copy is
+-- performed in this case (typically no copy is performed by VGet,
+-- but the underlying pointer is ephemeral, becoming invalid after
+-- the current read transaction). Fails if not enough data. O(N)
+getByteString :: Int -> VGet BS.ByteString
+getByteString n | (n > 0)   = _getByteString n
+                | otherwise = return (BS.empty)
+{-# INLINE getByteString #-}
+
+_getByteString :: Int -> VGet BS.ByteString
+_getByteString n = consuming n $ VGet $ \ s -> do
+    let pSrc = vget_target s
+    pDst <- mallocBytes n
+    copyBytes pDst pSrc n
+    fp <- newForeignPtr finalizerFree pDst
+    let r = BSI.fromForeignPtr fp 0 n
+    let s' = s { vget_target = (pSrc `plusPtr` n) }
+    return (VGetR r s')
+
+-- | Get a lazy bytestring. (Simple wrapper on strict bytestring.)
+getByteStringLazy :: Int -> VGet LBS.ByteString
+getByteStringLazy n = LBS.fromStrict <$> getByteString n
+{-# INLINE getByteStringLazy #-}
 
 
 
-{-
 
-    ( tryCommit
-    , optionMaybe
-    , many, many1, manyC
-    , manyTil, manyTilEnd
-    , satisfy, satisfyMsg, char, eof
-    ) where
+-- | Put a character in UTF-8 format.
+putc :: Char -> VPut ()
+putc a | c <= 0x7f      = putWord8 (fromIntegral c)
+       | c <= 0x7ff     = reserving 2 $ VPut $ \ s -> do
+                            let p  = vput_target s
+                            let s' = s { vput_target = (p `plusPtr` 2) } 
+                            poke p (0xc0 .|. y)
+                            poke p (0x80 .|. z)
+                            return (VPutR () s')
+       | c <= 0xffff    = reserving 3 $ VPut $ \ s -> do
+                            let p  = vput_target s
+                            let s' = s { vput_target = (p `plusPtr` 3) }
+                            poke p (0xe0 .|. x)
+                            poke p (0x80 .|. y)
+                            poke p (0x80 .|. z)
+                            return (VPutR () s')
+       | c <= 0x10ffff  = reserving 4 $ VPut $ \ s -> do
+                            let p = vput_target s
+                            let s' = s { vput_target = (p `plusPtr` 4) }
+                            poke p (0xf0 .|. w)
+                            poke p (0x80 .|. x)
+                            poke p (0x80 .|. y)
+                            poke p (0x80 .|. z)
+                            return (VPutR () s')
+        | otherwise     = fail "not a valid character" -- shouldn't happen
+    where 
+        c = ord a
+        z, y, x, w :: Word8
+        z = fromIntegral (c           .&. 0x3f)
+        y = fromIntegral (shiftR c 6  .&. 0x3f)
+        x = fromIntegral (shiftR c 12 .&. 0x3f)
+        w = fromIntegral (shiftR c 18 .&. 0x7)
 
-import Control.Applicative ((<$>),(<|>),(<*>))
-import Data.Binary
-import Data.Binary.Get
-import qualified Data.List as L
+-- | Get a character from UTF-8 format. Assumes a valid encoding.
+-- (In case of invalid encoding, arbitrary characters may be returned.)
+getc :: VGet Char
+getc = 
+    _c0 >>= \ b0 ->
+    if (b0 < 0x80) then return $! chr b0 else
+    if (b0 < 0xe0) then _getc2 (b0 `xor` 0xc0) else
+    if (b0 < 0xf0) then _getc3 (b0 `xor` 0xe0) else
+    _getc4 (b0 `xor` 0xf0)
 
--- | tryCommit is a two-phase parser. The first phase, which
--- returns the second-phase parser, is allowed to fail, in which
--- case Nothing is returned. Otherwise, the second phase is
--- required to succeed, i.e. we are committed to it.
---
--- This is used to limit backtracking, e.g. for the `many` or 
--- `optional` combinators.
-tryCommit :: Get (Get a) -> Get (Maybe a)
-tryCommit runPhase1 = do
-    maybePhase2 <- (Just <$> runPhase1) <|> return Nothing
-    case maybePhase2 of
-        Just runPhase2 -> Just <$> runPhase2
-        Nothing -> return Nothing
+-- get UTF-8 of size 2,3,4 bytes
+_getc2, _getc3, _getc4 :: Int -> VGet Char
+_getc2 b0 =
+    _cc >>= \ b1 ->
+    return $! chr ((b0 `shiftL` 6) .|. b1)
+_getc3 b0 =
+    _cc >>= \ b1 ->
+    _cc >>= \ b2 ->
+    return $! chr ((b0 `shiftL` 12) .|. (b1 `shiftL` 6) .|. b2)
+_getc4 b0 =
+    _cc >>= \ b1 ->
+    _cc >>= \ b2 ->
+    _cc >>= \ b3 ->
+    return $! chr ((b0 `shiftL` 18) .|. (b1 `shiftL` 12) .|. (b2 `shiftL` 6) .|. b3)
 
--- | parse a value that satisfies some refinement condition.
-satisfy :: (Binary a) => (a -> Bool) -> Get a
-satisfy = satisfyMsg "unexpected value"
-
--- | satisfy with a given error message on fail
-satisfyMsg :: (Binary a) => String -> (a -> Bool) -> Get a 
-satisfyMsg errMsg test = 
-    get >>= \ a ->
-    if test a then return a 
-              else fail errMsg
-
--- | match a particular character
-char :: Char -> Get Char
-char c = satisfyMsg eMsg (== c) where
-    eMsg = '\'' : c : "' expected"
-
-optionMaybe :: Get a -> Get (Maybe a)
-optionMaybe op = tryCommit (return <$> op)
-
--- | parse zero or more entries.
-many :: Get a -> Get [a]
-many = manyC . (return <$>)
-
--- | parse one or more entries.
-many1 :: Get a -> Get [a]
-many1 g = (:) <$> g <*> many g
-
--- | parse many elements with partial commit (e.g. for LL1 parsers).
---
--- Allowing failure in the middle of parsing an element helps control
--- how far the parser can backtrack.
-manyC :: Get (Get a) -> Get [a]
-manyC gg = loop [] where
-    tryA = tryCommit gg
-    loop as = 
-        tryA >>= \ mba ->
-        case mba of
-            Nothing -> return (L.reverse as)
-            Just a -> loop (a:as)
-
--- | parse EOF, i.e. fail if not at end of input
-eof :: Get ()
-eof = 
-    isEmpty >>= \ bEmpty ->
-    if bEmpty then return () else 
-    fail "end of input expected"
-
-{- -- older version for `cereal` (which lacks a sensible isEmpty)
-eof = (peek >> fail emsg) <|> return () where
-    peek = lookAhead getWord8
-    emsg = "end of input expected"
--}
-
--- | parseManyTil: try to parse many inputs til we reach a terminal
-manyTil :: Get a -> Get end -> Get [a]
-manyTil a e = fst <$> manyTilEnd a e
-
--- | parse many inputs until terminal; return the terminal, too
---
--- Note that parseManyTil* doesn't have the same difficulty as 
--- parseMany since we need to lookahead on elements.
-manyTilEnd :: Get a -> Get end -> Get ([a],end)
-manyTilEnd getElem atEnd = loop [] where
-    loop as = (atEnd >>= \ end -> return (L.reverse as, end))
-          <|> (getElem >>= \ a -> loop (a:as))
-
--}
+_c0,_cc :: VGet Int
+_c0 = fromIntegral <$> getWord8
+_cc = (fromIntegral . xor 0x80) <$> getWord8
+{-# INLINE _c0 #-}
+{-# INLINE _cc #-}
 
 
+-- | label will modify the error message returned from the
+-- argument operation; it can help contextualize parse errors.
+label :: ShowS -> VGet a -> VGet a
+label sf op = VGet $ \ s ->
+    _vget op s >>= \ r ->
+    return $
+    case r of
+        VGetE emsg -> VGetE (sf emsg)
+        ok@(VGetR _ _) -> ok
+
+-- | lookAhead will parse a value, but not consume any input.
+lookAhead :: VGet a -> VGet a
+lookAhead op = VGet $ \ s ->
+    _vget op s >>= \ result -> 
+    return $
+    case result of
+        VGetR r _ -> VGetR r s
+        other -> other
+
+-- | lookAheadM will consume input only if it returns `Just a`.
+lookAheadM :: VGet (Maybe a) -> VGet (Maybe a)
+lookAheadM op = VGet $ \ s ->
+    _vget op s >>= \ result -> 
+    return $
+    case result of
+        VGetR Nothing _ -> VGetR Nothing s
+        other -> other
+
+-- | lookAheadE will consume input only if it returns `Right b`.
+lookAheadE :: VGet (Either a b) -> VGet (Either a b)
+lookAheadE op = VGet $ \ s ->
+    _vget op s >>= \ result ->
+    return $
+    case result of
+        VGetR l@(Left _) _ -> VGetR l s
+        other -> other
+
+-- | isEmpty will return True iff there is no available input (neither
+-- references nor values).
+isEmpty :: VGet Bool
+isEmpty = VGet $ \ s ->
+    let bEOF = (vget_target s == vget_limit s) 
+            && (L.null (vget_children s))
+    in
+    bEOF `seq` return (VGetR bEOF s)
+
+instance VCacheable Int where
+    get = fromIntegral <$> getVarInt
+    put = putVarInt . fromIntegral
+
+instance VCacheable Integer where
+    get = getVarInt
+    put = putVarInt
+
+instance VCacheable Char where 
+    get = getc
+    put = putc
+
+instance VCacheable BS.ByteString where
+    get = getVarNat >>= getByteString . fromIntegral
+    put s = putVarNat (fromIntegral $ BS.length s) >> putByteString s 
+
+instance VCacheable LBS.ByteString where
+    get = getVarNat >>= getByteStringLazy . fromIntegral
+    put s = putVarNat (fromIntegral $ LBS.length s) >> putByteStringLazy s
+
+instance (VCacheable a) => VCacheable (VRef a) where
+    get = getVRef
+    put = putVRef
+
+instance (VCacheable a) => VCacheable (Maybe a) where
+    get = getWord8 >>= \ jn ->
+          if (jn == fromIntegral (ord 'J')) then Just <$> get else
+          if (jn == fromIntegral (ord 'N')) then return Nothing else
+          fail "Type `Maybe a` expects prefix J or N"
+    put (Just a) = putWord8 (fromIntegral (ord 'J')) >> put a
+    put Nothing  = putWord8 (fromIntegral (ord 'N'))
+
+instance (VCacheable a, VCacheable b) => VCacheable (Either a b) where
+    get = getWord8 >>= \ lr ->
+          if (lr == fromIntegral (ord 'L')) then Left <$> get else
+          if (lr == fromIntegral (ord 'R')) then Right <$> get else
+          fail "Type `Either a b` expects prefix L or R"
+    put (Left a) = putWord8 (fromIntegral (ord 'L')) >> put a
+    put (Right b) = putWord8 (fromIntegral (ord 'R')) >> put b
+
+instance (VCacheable a, VCacheable b) => VCacheable (a,b) where
+    get = (,) <$> get <*> get
+    put (a,b) = put a >> put b
+
+instance (VCacheable a, VCacheable b, VCacheable c) => VCacheable (a,b,c) where
+    get = (,,) <$> get <*> get <*> get
+    put (a,b,c) = put a >> put b >> put c
+
+instance (VCacheable a, VCacheable b, VCacheable c, VCacheable d) => VCacheable (a,b,c,d) where
+    get = (,,,) <$> get <*> get <*> get <*> get
+    put (a,b,c,d) = put a >> put b >> put c >> put d

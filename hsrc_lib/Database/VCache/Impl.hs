@@ -56,6 +56,12 @@ addr2vref space addr =
         }
 {-# INLINE addr2vref #-}
 
+-- a few small prime numbers for hashing
+p_100, p_1000, p_10k :: Word64
+p_100 = 541
+p_1000 = 7919
+p_10k = 104729
+
 -- | Load or Create the cache for a given location and type.
 --
 -- Other than the GC operation, this is the only function that should 
@@ -64,7 +70,7 @@ loadMemCache :: (Typeable a) => a -> VSpace -> Address -> IO (MVar (Cached a))
 loadMemCache _dummy space addr = atomicModifyIORef mcrf loadCache where
     mcrf = vcache_mem_vrefs space
     typa = typeOf _dummy
-    hkey = fromIntegral $ _hty typa + (addr * 6679)
+    hkey = fromIntegral $ _hty typa + (addr * p_1000)
     match eph = (addr == eph_addr eph) -- must match address
              && (typa == eph_type eph) -- must match type
     getCache = unsafeDupablePerformIO . Weak.deRefWeak . _unsafeEphWeak
@@ -97,6 +103,6 @@ _unsafeCoerceWeakCache = unsafeCoerce
 -- simple hash for a typerep. I'm going to assume the hash is
 -- good enough already, so I'm just combining the parts.
 _hty :: TypeRep -> Word64
-_hty (TypeRep (Fingerprint a b) _ _) = (a * 35983) + b
+_hty (TypeRep (Fingerprint a b) _ _) = (a * p_10k) + (b * p_100)
 
 

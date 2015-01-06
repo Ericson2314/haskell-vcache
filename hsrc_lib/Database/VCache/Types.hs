@@ -6,9 +6,9 @@ module Database.VCache.Types
     ( Address
     , VRef(..), Cached(..), VRef_(..)
     , Eph(..), EphMap 
-    , PVar(..), PVar_(..)
+    , PVar(..)
     , PVEph(..), PVEphMap
-    , VTx(..)
+    , VTx(..), TxW(..)
     , VCache(..)
     , VSpace(..)
     , VPut(..), VPutS(..), VPutR(..)
@@ -78,7 +78,7 @@ data Eph = forall a . Eph
     , eph_type :: !TypeRep
     , eph_weak :: {-# UNPACK #-} !(Weak (MVar (Cached a)))
     }
-type EphMap = IntMap [Eph] --  bucket hash on Address & TypeRep
+type EphMap = IntMap [Eph] -- bucket hashmap on Address & TypeRep
     -- type must be part of hash, or we'll have too many collisions
     -- where values tend to overlap in representation, e.g. the 
     -- 'empty' values.
@@ -138,7 +138,6 @@ data PVar a = PVar
     , pvar_write   :: !(a -> VPut ())
     } deriving (Typeable)
 instance Eq (PVar a) where (==) = (==) `on` pvar_content
-data PVar_ = forall a . PVar_ !(PVar a)
 data PVEph = forall a . PVEph !TypeRep {-# UNPACK #-} !(Weak (TVar a))
 type PVEphMap = Map ByteString PVEph
 
@@ -314,15 +313,19 @@ data WriteVal = WriteVal
 -- the same time, amortizing synchronization costs for bursts of
 -- updates (common in many domains).
 -- 
-newtype VTx a = VTx { _vtx :: StateT WriteList STM a }
+newtype VTx a = VTx { _vtx :: StateT WriteLog STM a }
     deriving (Monad, Functor, Applicative, Alternative, MonadPlus)
     -- basically, just an STM transaction that additionally tracks
-    -- writes to PVars involving many VCache resources. This list 
-    -- is delivered to the writer threads only if the transaction
+    -- writes to PVars, potentially across many VCache resources.
+    -- List is delivered to the writer threads only if the transaction
     -- commits. Serialization is lazy to better support batching. 
 
-type WriteList  = [(VSpace, WriteBatch)]           
-type WriteBatch = Map ByteString (VPut ()) 
+type WriteLog  = [TxW]
+data TxW = forall a . TxW !(PVar a) (VPut ())
+    -- note: PVars should not be GC'd before written to disk. An
+    -- alternative is that `loadPVar` waits on active writes, or
+    -- accesses the global write log. But it's easiest to simply
+    -- not GC until finished writing.
 
 type Ptr8 = Ptr Word8
 type PtrIni = Ptr8
