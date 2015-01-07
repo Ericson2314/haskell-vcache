@@ -64,6 +64,8 @@ Library
   Exposed-Modules:
     Database.VCache
     Database.VCache.VCacheable
+    Database.VCache.VPut
+    Database.VCache.VGet
 
   Other-Modules:
     Database.VCache.Types
