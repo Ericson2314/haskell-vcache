@@ -1,23 +1,25 @@
 haskell-vcache
 ==============
 
-VCache enables Haskell developers using 64-bit systems to:
-
 * work with structured acyclic values larger than system memory 
-* update persistent PVars and STM TVars together, atomically 
-* achieve a high degree of structure sharing 
-* compare or diff large values based on reference equality
-* easily decompose applications into persistent subprograms
+* update persistent variables and STM TVars together, atomically 
+* structure sharing; diff structures with reference equality 
+* subdirectories for roots support decomposition of applications
 
-VCache performs garbage collection at the persistence layer, but tracks ephemeral value references in Haskell memory. This offers a convenient separation of concerns between large memcached values and persistent variables, and greatly reduces synchronization requirements. VCache garbage collection is based on reference counting, and tracking Haskell value references is achieved by use of `System.Mem.Weak` and `mkWeakMVar`.
+Concepts
+--------
 
-The type `VRef a` denotes an immutable value reference. To dereference a value or create a value reference is considered a pure computation. Persisted values are serialized as a stream of value references and bytes. Structure sharing is applied for values of identical representations. On dereference, values will typically be cached to avoid parsing and improve structure sharing on future dereference. Developers have some control over caching on a per reference basis. 
+VCache provides extended, persistent memory with ACID transactions to Haskell. The intention is to support applications that operate on data much larger than system memory, or that desire nearly transparent persistence. VCache uses two main concepts: **VRef** and **PVar**.
 
-The type `PVar a` denotes a persistent variable. Persistent variables are manipulated transactionally. VCache will combine transactions that complete at around the same time into one larger transaction at the persistence layer, thereby amortizing synchronization costs for bursts of small transactions. Full ACID properties are supported, but durability is optional. Transactions may include arbitrary STM computations, which simplifies consistency between the application's volatile and persistent layers.
+A **VRef** is a reference to an immutable value, which is usually stored outside normal Haskell process memory. When dereferenced, the value will be parsed and loaded into Haskell's memory. Typically, a dereferenced value will be cached for a little while, in case of future dereference operations. But developers do have some ability to bypass or control the cache behavior. Constructing a VRef is treated as a pure computation, and structure sharing is applied automatically (values with the same serialized representation will share the same address). 
 
-By confining subprograms each to their own subset of persistent variable resources, it becomes much easier to reason about communication within an application. To support this, VCache provides a simple filesystem-like model, enabling different subprograms to be confined subdirectories to be provided to different subprograms. A single VCache object may easily be shared across many libraries and frameworks, and PVars from parent or sibling directories become securable capabilities. Developers need only to preserve stability of resource identifiers across versions of source code, which is not difficult to do.
+A **PVar** is a reference to a mutable variable, which contains a value. Like VRefs, values contained by PVars are usually stored outside normal Haskell process memory, but will be parsed and loaded when necessary. When updated, writes on PVars are batched and persisted atomically to the VCache backend. Durable transactions further wait for a signal that everything is synchronized to disk.
 
-VCache is backed by [LMDB](http://symas.com/mdb/), a memory mapped key-value store.
+Values serialized to VCache may contain PVars and VRefs internally. This allows working with very large values and ad-hoc domain models, so long as we can break them up using PVars and VRefs as pointers to smaller values. However, there is a major caveat: garbage collection of VCache uses reference counting. Values cannot be cyclic, and developers must either avoid cycles between PVars or be willing to break cycles expliclitly before a PVar goes out of scope. Reference counting is favored because it behaves nicely (compared to space walking collectors) at very large scales. In addition to reference counting, `System.Mem.Weak` prevents collection of ephemeral content contained by PVars or VRefs held in process memory.
+
+Persistence is supported by **named roots**, which are essentially global PVars in a virtual filesystem. These PVars may easily be loaded from one instance of the application to another. Typically, an application should have only one or a few of these global roots, pushing most structure into the domain model. However, there is no restriction on the number of roots, and PVars obtained this way are still first-class.
+
+VCache is backed by LMDB, a memory-mapped key value store that is known to scale to at least a few terabytes and theoretically can scale to a few exabytes. You'll likely distribute and shard your application long before reaching any theoretical limits. VCache uses LMDB without locking (i.e. the `MDB_NOLOCK` option), and has internal structures that must be limited to a single process (e.g. ephemeron tables to track VRefs and PVars in memory). An additional lockfile helps resist the accidental corruption that might occur if a single VCache is used concurrently.
 
 Compare and Contrast
 --------------------
@@ -33,12 +35,14 @@ Haskell packages similar to VCache:
 Notes and Caveats
 -----------------
 
-VCache uses LMDB with the `MDB_NOLOCK` flag, and provides its own concurrency control for the lightweight Haskell threads. This results in a simpler implementation (e.g. no need to deal with bound threads). However, it sacrifices a few of LMDB's nice features; for example, we cannot ensure consistency with the `mdb_copy` command line utility on a VCache backing file (at least, not without halting the application). However, VCache does utilize a simple lockfile to reduce risk of opening a resource twice at the VCache layer.
+Multiple VCache instances won't work together very nicely. First-class PVars cannot be shared between VCache spaces. For values that may be shared, implicit deep copies would be a performance headache. VCache will generally raise a runtime exception if you accidentally mix values from two instances. The best use case for VCache is to open one root instance in your main function then pass it to whichever subprograms need it. Persistent libraries and frameworks and plugins and so on should accept VCache as an argument, rather than each loading their own. VCache's subdirectory model can provide a fresh, stable namespace to each subprogram.
 
-VCache is not a database. It's just a bunch of persistent variables and values. If developers want database features - such as queries, indices, views - those must be implemented in another layer, e.g. the application or library or framework. It is recommended that libraries or frameworks using VCache should always accept the VCache as an argument, rather than each creating its own file. Doing so improves hierarchical decomposition and the ability for values to easily be shared between subprograms.
+VCache does not support concurrent instances and mustn't be used for inter-process communication. The LMDB layer uses the `MDB_NOLOCK` flag, and important components (STM, GC) are process local anyway. Without reader locks, the `mdb_copy` utility won't work on a running LMDB database. VCache does use a coarse grained lockfile to resist accidental concurrency (i.e. if you start the app twice with the same LMDB backing file, one of the two should wait briefly on the lock then fail).
 
-PVars are not 'first class': VRef values may not contain PVars. While I could implement first class PVars, and even anonymous GC'd PVars, it isn't clear to me that doing so is a good idea. It would certainly hinder mobility of VRef values (ability to copy them to another cache, or replicate across a network), and it may discourage purely functional domain models. For now, I'm leaving this potential feature outside the scope of VCache. (Even so, VCache is much more expressive than acid-state, perdure, and TCache.)
+VCache is not a database. VCache is just transparent persistence and extended memory for Haskell. If developers desire rich database features - such as queries, indices, views, searches, import/export - those must be implemented at the application layer. VCache is suitable for developing purpose specific databases within an application, but you probably don't need the full gamut of database features at the VCache layer.
 
-PVar transactions use optimistic concurrency. While this has many advantages, there is risk of a long stream of short transactions 'starving' a long running read-write transaction. If a PVar has many writers, developers may need to utilize external synchronization or cooperation patterns to reduce conflict. It shouldn't be difficult to model persistent queues and command patterns and so on. 
+Transactions use optimistic concurrency. While this has many advantages, a stream of short transactions may starve a long running read-write transaction. Where heavy contention is anticipated or observed, developers should utilize external synchronization or cooperation patterns to reduce conflict, such as queues and channels and so on. 
 
-LMDB files are not especially portable. Endian-ness, filesystem block sizes, and so on hinder porting files.
+You need a 64-bit system to effectively leverage VCache. Because LMDB is memory mapped, it is limited by available address space (independently of available memory). 
+
+LMDB files are not very portable. Endianness and sensitivity to filesystem block size may interfere with porting LMDB files.

@@ -5,7 +5,7 @@ module Database.VCache.VPut
     ( VPut
 
     -- * Prim Writers
-    , putVRef, putVRef'
+    , putVRef
     , putWord8
     , putWord16le, putWord16be
     , putWord32le, putWord32be
@@ -80,24 +80,15 @@ unsafePutWord8 w8 = VPut $ \ s ->
     return (VPutR () s')
 {-# INLINE unsafePutWord8 #-}
 
--- | Store a reference to a value. The value will be copied implicitly
--- to the target address space, if necessary.
+-- | Store a reference to a value, which must already be part of the
+-- destination's address space. Usually, you should open only one 
+-- VCache, so this should not be a problem. Values must not be moved
+-- between spaces without explicit copy. 
 putVRef :: VRef a -> VPut ()
 putVRef r = VPut $ \ s ->
-    let r' = mvref (vput_space s) r in
-    _putVRef s (VRef_ r')
-{-# INLINE putVRef #-}
-
--- | Store a reference to a value that you know is already part of the
--- destination address space. This operation fails if the input is not
--- already part of the destination space. This is useful for reasoning
--- about performance, but shifts some burden to the developer to ensure
--- all values have one location.
-putVRef' :: VRef a -> VPut ()
-putVRef' r = VPut $ \ s ->
     if (vput_space s == vref_space r) then _putVRef s (VRef_ r) else
     fail $ "putVRef' argument is not from destination VCache" 
-{-# INLINE putVRef' #-}
+{-# INLINE putVRef #-}
 
 -- assuming destination and ref have same address space
 _putVRef :: VPutS -> VRef_ -> IO (VPutR ())

@@ -56,6 +56,11 @@ instance (VCacheable a) => VCacheable (VRef a) where
     {-# INLINE get #-}
     {-# INLINE put #-}
 
+-- unit is not actually serialized.
+instance VCacheable () where
+    get = return ()
+    put _ = return ()
+
 instance (VCacheable a) => VCacheable (Maybe a) where
     get = getWord8 >>= \ jn ->
           if (jn == fromIntegral (ord 'J')) then Just <$> get else
@@ -110,12 +115,8 @@ instance (VCacheable a, VCacheable b, VCacheable c, VCacheable d, VCacheable e)
 instance (VCacheable a, VCacheable b, VCacheable c, VCacheable d, VCacheable e
          , VCacheable f) => VCacheable (a,b,c,d,e,f) where
     get = 
-        do a <- get
-           b <- get
-           c <- get
-           d <- get
-           e <- get
-           f <- get
+        do a <- get; b <- get; c <- get
+           d <- get; e <- get; f <- get
            return (a,b,c,d,e,f)
     put (a,b,c,d,e,f) = do { put a; put b; put c; put d; put e; put f }
     {-# INLINE get #-}
@@ -124,13 +125,8 @@ instance (VCacheable a, VCacheable b, VCacheable c, VCacheable d, VCacheable e
 instance (VCacheable a, VCacheable b, VCacheable c, VCacheable d, VCacheable e
          , VCacheable f, VCacheable g) => VCacheable (a,b,c,d,e,f,g) where
     get = 
-        do a <- get
-           b <- get
-           c <- get
-           d <- get
-           e <- get
-           f <- get
-           g <- get
+        do a <- get; b <- get; c <- get
+           d <- get; e <- get; f <- get; g <- get
            return (a,b,c,d,e,f,g)
     put (a,b,c,d,e,f,g) = do { put a; put b; put c; put d; put e; put f; put g }
     {-# INLINE get #-}

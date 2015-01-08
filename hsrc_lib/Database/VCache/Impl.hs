@@ -1,12 +1,10 @@
 
 -- primary implementation of VCache (might break up later)
 module Database.VCache.Impl 
-    ( mvref
-    , addr2vref
+    ( addr2vref
     , loadMemCache
     ) where
 
-import Control.Concurrent.MVar
 import Data.IORef
 import Data.Map.Strict (Map)
 import Data.Word
@@ -23,26 +21,6 @@ import System.Mem.Weak (Weak)
 import qualified System.Mem.Weak as Weak
 import System.IO.Unsafe
 import Unsafe.Coerce
-
--- | Move a VRef into a target destination space. This will exit fast
--- if the VRef is already in the target location, otherwise performs a
--- deep copy. 
---
--- In general, developers should try to avoid moving values between 
--- caches. This is more efficient than parsing and serializing values,
--- but is still expensive and shouldn't happen by accident. Developers
--- using more than one VCache (a rather unusual scenario) should have
--- a pretty good idea about the dataflow between them to minimize this
--- operation.
---
-mvref :: VSpace -> VRef a -> VRef a
-mvref sp ref =
-    if (sp == vref_space ref) then ref else
-    _deepCopy sp ref
-{-# INLINE mvref #-}
-
-_deepCopy :: VSpace -> VRef a -> VRef a
-_deepCopy dst src = error "todo: mvref deep copy"
 
 -- | Obtain a VRef given an address 
 addr2vref :: (VCacheable a) => VSpace -> Address -> IO (VRef a)
@@ -66,7 +44,7 @@ p_10k = 104729
 --
 -- Other than the GC operation, this is the only function that should 
 -- touch vcache_mem_vrefs. It is both a reader and a writer.
-loadMemCache :: (Typeable a) => a -> VSpace -> Address -> IO (MVar (Cached a))
+loadMemCache :: (Typeable a) => a -> VSpace -> Address -> IO (IORef (Cache a))
 loadMemCache _dummy space addr = atomicModifyIORef mcrf loadCache where
     mcrf = vcache_mem_vrefs space
     typa = typeOf _dummy
@@ -80,8 +58,8 @@ loadMemCache _dummy space addr = atomicModifyIORef mcrf loadCache where
             Just c -> (mc, c)
             Nothing -> unsafePerformIO (initCache mc)
     initCache mc = do
-        c <- newEmptyMVar
-        wc <- mkWeakMVar c (return ())
+        c <- newIORef NotCached
+        wc <- mkWeakIORef c (return ())
         let eph = Eph { eph_addr = addr, eph_type = typa, eph_weak = wc }
         let addEph = Just . (eph:) . maybe [] id
         let mc' = IntMap.alter addEph hkey mc 
@@ -90,13 +68,13 @@ loadMemCache _dummy space addr = atomicModifyIORef mcrf loadCache where
 -- this is a bit of a hack... it is unsafe in general, since
 -- Eph doesn't track the type `a`. We'll coerce it, assuming
 -- the type is known in context.
-_unsafeEphWeak :: Eph -> Weak (MVar (Cached a))
+_unsafeEphWeak :: Eph -> Weak (IORef (Cache a))
 _unsafeEphWeak (Eph { eph_weak = w }) = _unsafeCoerceWeakCache w 
 {-# INLINE _unsafeEphWeak #-}
 
 -- unsafe coercion; used in contexts where we know type 
 -- (via matching TypeRep and location); similar to Data.Dynamic.
-_unsafeCoerceWeakCache :: Weak (MVar (Cached b)) -> Weak (MVar (Cached a))
+_unsafeCoerceWeakCache :: Weak (IORef (Cache b)) -> Weak (IORef (Cache a))
 _unsafeCoerceWeakCache = unsafeCoerce
 {-# INLINE _unsafeCoerceWeakCache #-}
 

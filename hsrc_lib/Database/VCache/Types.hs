@@ -1,10 +1,9 @@
 {-# LANGUAGE DeriveDataTypeable, ExistentialQuantification, GeneralizedNewtypeDeriving #-}
 
--- Internal file. Lots of types. 
--- Lots of coupling... but VCache is just one module.
+-- Internal file. Lots of types. Lots of coupling.
 module Database.VCache.Types
     ( Address
-    , VRef(..), Cached(..), VRef_(..)
+    , VRef(..), Cache(..), VRef_(..)
     , Eph(..), EphMap 
     , PVar(..)
     , PVEph(..), PVEphMap
@@ -26,7 +25,7 @@ import Data.ByteString (ByteString)
 import Control.Monad
 import Control.Monad.STM (STM)
 import Control.Applicative
-import Control.Concurrent.MVar
+-- import Control.Concurrent.MVar
 import Control.Concurrent.STM.TVar
 import Control.Monad.Trans.State
 import System.Mem.Weak (Weak)
@@ -37,38 +36,32 @@ import Foreign.Ptr
 type Address = Word64 -- with '0' as special case
 
 -- | A VRef is an opaque reference to an immutable value stored in an
--- auxiliary address space backed by the filesystem. This allows very
--- large values to be represented without burdening the process heap
--- or Haskell garbage collector. 
+-- auxiliary address space backed by the filesystem (via LMDB). VRef 
+-- allows very large values to be represented without burdening the 
+-- process heap or Haskell garbage collector. The assumption is that
+-- the very large value doesn't need to be in memory all at once.
 --
 -- The API involving VRefs is conceptually pure.
 --
 --     vref     :: (VCacheable a) => VSpace -> a -> VRef a
---     deref    :: (VCacheable a) => VRef a -> a
+--     deref    :: VRef a -> a
 -- 
--- We are moving data around under the hood (via unsafePerformIO),
--- but the client can pretend that VRef is just another value.
--- 
--- Important Points:
+-- Construction must serialize the value, hash the serialized form
+-- (for structure sharing), and write it into the backend. Deref will
+-- read the serialized form, parse the value back into Haskell memory,
+-- and cache it locally. Very large values and domain models are 
+-- supported by allowing VRefs and PVars to themselves be cacheable.
 --
--- * Holding a VRef in memory prevents GC of the referenced value.
---   Under the hood, `mkWeakMVar` is used for an ephemeron table.
--- * Values are cached such that multiple derefs in a short period
---   of time will efficienty return the same Haskell value. Caching
---   may be bypassed or controlled by developers.
--- * Structure sharing. Within a cache, VRefs are equal iff their 
---   values are equal. (VRefs from different caches are not equal.)
+-- Developers have some ability to bypass or influence cache behavior.
 --
 data VRef a = VRef 
     { vref_addr   :: {-# UNPACK #-} !Address            -- ^ address within the cache
-    , vref_cache  :: {-# UNPACK #-} !(MVar (Cached a))  -- ^ cached value & weak refs 
+    , vref_cache  :: {-# UNPACK #-} !(IORef (Cache a))  -- ^ cached value & weak refs 
     , vref_space  :: !VSpace                            -- ^ cache manager for this VRef
     , vref_parse  :: !(VGet a)                          -- ^ parser for this VRef
     } deriving (Typeable)
 instance Eq (VRef a) where (==) = (==) `on` vref_cache
 data VRef_ = forall a . VRef_ !(VRef a) -- VRef without type information.
-
--- idea: vrefNear :: (VCacheable a) => VRef b -> a -> VRef a
 
 -- For every VRef we have in memory, we need an ephemeron in a table.
 -- This ephemeron table supports structure sharing, caching, and GC.
@@ -76,60 +69,57 @@ data VRef_ = forall a . VRef_ !(VRef a) -- VRef without type information.
 data Eph = forall a . Eph
     { eph_addr :: {-# UNPACK #-} !Address
     , eph_type :: !TypeRep
-    , eph_weak :: {-# UNPACK #-} !(Weak (MVar (Cached a)))
+    , eph_weak :: {-# UNPACK #-} !(Weak (IORef (Cache a)))
     }
 type EphMap = IntMap [Eph] -- bucket hashmap on Address & TypeRep
     -- type must be part of hash, or we'll have too many collisions
     -- where values tend to overlap in representation, e.g. the 
     -- 'empty' values.
 
--- Every VRef has a hole (via MVar) to potentially record a cached
--- value without loading it from LMDB. A little extra information
--- supports heuristics to decide when to clear the value from memory.
-data Cached a = Cached 
-    { cached_value  :: a
-    , cached_gcbits :: {-# UNPACK #-} !Word16
-    } 
--- gcbits:
---   bit 0: set 0 when read, set 1 by every GC pass
---   bit 1,2,3,4,5: log scale weight estimate
---   bit 6,7: cache control mode.
---   bits 8..15: for GC internal use.
--- 
--- basic weight heuristic...
---   80 + bytes + 80*refs
---   size heuristic is 2^(N+8)
---   (above max, just use max)
+-- Every VRef contains its own cache. (Thus, there is no extra lookup
+-- overhead to test the cache, and this simplifies interaction with GC). 
+-- The cache includes an integer as a bitfield to describe mode.
+data Cache a 
+        = NotCached 
+        | Cached a {-# UNPACK #-} !Word16
+
 --
--- cache control modes?
--- 
---  0: minimal timeout
---  1: short timeout
---  2: long timeout
---  3: lock into cache
---  
+-- cache bitfield for mode:
+--   bit 0..1: cache control mode.
+--     no timeout, short timeout, long timeout, locked
+--   bit 2..6: heuristic weight, log scale.
+--     bytes + 80*(refs+1)
+--     size heuristic is 2^(N+8)
+--   bits 7..15
+--     if locked, count of locks (max val = inf).
+--     otherwise, touch count by GC (reset to zero on read or update)
+--
+
    
 
--- | A PVar is a persistent variable associated with a VCache. PVars are
--- second class: named by bytestrings in a filesystem-like namespace,
--- but not themselves cacheable.
+-- | A PVar is a persistent variable associated with a VCache. Reads
+-- and writes to a PVar are transactional. The transaction model is a
+-- thin layer above STM (and may include arbitrary STM actions, update
+-- TVars and TArrays and so on). PVars may contain VCacheable values,
+-- including other PVars and VRefs.
 --
---     loadPVarIO :: (VCacheable a) => VCache -> ByteString -> a -> IO (PVar a)
---     loadPVar   :: (VCacheable a) => VCache -> ByteString -> a -> VTx (PVar a)
---     readPVarIO :: PVar a -> IO a
---     readPVar   :: PVar a -> VTx a
---     writePVar  :: PVar a -> a -> VTx ()
---     runVTx     :: VTx a -> IO a
+-- Contents of a PVar are typically memcached: parsed into memory as
+-- needed then returning to cold store when inactive. This supports
+-- domain models much larger than system memory. Cache policy may be
+-- tweaked as needed, e.g. to lock a PVar into memory if you know you
+-- will need it.
 --
--- The PVar type `a` does not use structure sharing or memcaching. The full
--- value is loaded into Haskell memory, and updated by writer transactions.
--- To take full advantage of VCache, developers must use VRefs in type `a`,
--- and keep `a` itself relatively small.
+-- Writes to a PVar are batched and persisted by a background thread. 
+-- Transactions are optionally durable. Durable transactions simply
+-- wait on a signal from the writer thread that the batch has been
+-- fully committed to the filesystem. Non-durable transactions may
+-- read and write PVars without ever waiting on the LMDB layer, but
+-- might be slightly out of synch with what is on the disk.
 --
--- Note: PVar names should be short. Names smaller than 128 characters will
--- be used directly, but larger names may be hashed and truncated, at risk
--- of accidental collisions and security holes if clients control names. For
--- most use-cases, this should be a non-issue.
+-- In addition to first-class PVars, developers can access a set of
+-- named root PVars that serve as global variables. The named roots
+-- are the real foundation for persistence, but PVars not part of
+-- named roots can still be useful as memcached variables.
 --
 data PVar a = PVar
     { pvar_content :: !(TVar a)
