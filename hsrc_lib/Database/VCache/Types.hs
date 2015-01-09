@@ -33,6 +33,7 @@ import System.FileLock (FileLock)
 import Database.LMDB.Raw
 import Foreign.Ptr
 
+-- | An address in the VCache address space
 type Address = Word64 -- with '0' as special case
 
 -- | A VRef is an opaque reference to an immutable value stored in an
@@ -90,46 +91,45 @@ data Cache a
 --   bit 2..6: heuristic weight, log scale.
 --     bytes + 80*(refs+1)
 --     size heuristic is 2^(N+8)
---   bits 7..15
+--   bits 7..15:
 --     if locked, count of locks (max val = inf).
---     otherwise, touch count by GC (reset to zero on read or update)
+--     otherwise, touch counter for timing by GC
 --
 
-   
-
--- | A PVar is a persistent variable associated with a VCache. Reads
--- and writes to a PVar are transactional. The transaction model is a
--- thin layer above STM (and may include arbitrary STM actions, update
--- TVars and TArrays and so on). PVars may contain VCacheable values,
--- including other PVars and VRefs.
+-- | A PVar is a mutable variable backed by VCache, and which thus
+-- may be referenced through cached values. PVars are transactional,
+-- allowing atomic, consistent, isolated, and durable (ACID) updates.
 --
--- Contents of a PVar are typically memcached: parsed into memory as
--- needed then returning to cold store when inactive. This supports
--- domain models much larger than system memory. Cache policy may be
--- tweaked as needed, e.g. to lock a PVar into memory if you know you
--- will need it.
+-- PVars are not cached. Holding onto a PVar will lock its value in
+-- Haskell memory. Cached variables must be modeled explicitly, by
+-- having a PVar contain a VRef. However, the first read of a PVar is
+-- lazy to avoid recursion when parsing values.
 --
--- Writes to a PVar are batched and persisted by a background thread. 
--- Transactions are optionally durable. Durable transactions simply
--- wait on a signal from the writer thread that the batch has been
--- fully committed to the filesystem. Non-durable transactions may
--- read and write PVars without ever waiting on the LMDB layer, but
--- might be slightly out of synch with what is on the disk.
---
--- In addition to first-class PVars, developers can access a set of
--- named root PVars that serve as global variables. The named roots
--- are the real foundation for persistence, but PVars not part of
--- named roots can still be useful as memcached variables.
---
+-- VCache supplies a table of 'named root' PVars, which form the basis
+-- for persistence. These root PVars may be accessed by stable name 
+-- from one execution of the application to another. The idea is that
+-- roots should provide just a little shallow structure, while deeper
+-- structure is modeled in the Haskell type system and values.
+-- 
+-- Developers must be careful with respect to cyclic references among
+-- PVars. The VCache garbage collector uses reference counting because
+-- it scales nicely to very large content. But cyclic references will
+-- stymie this simplistic algorithm. Cycles must be avoided or broken
+-- to avoid leaking disk space.
+-- 
 data PVar a = PVar
-    { pvar_content :: !(TVar a)
-    , pvar_name    :: !ByteString -- full name
-    , pvar_space   :: !VSpace     -- 
-    , pvar_write   :: !(a -> VPut ())
+    { pvar_addr  :: {-# UNPACK #-} !Address
+    , pvar_data  :: {-# UNPACK #-} !(TVar a)
+    , pvar_write :: !(a -> VPut ())
+    , pvar_space :: !VSpace
     } deriving (Typeable)
-instance Eq (PVar a) where (==) = (==) `on` pvar_content
-data PVEph = forall a . PVEph !TypeRep {-# UNPACK #-} !(Weak (TVar a))
-type PVEphMap = Map ByteString PVEph
+instance Eq (PVar a) where (==) = (==) `on` pvar_data
+data PVEph = forall a . PVEph
+    { pveph_addr :: {-# UNPACK #-} !Address
+    , pveph_type :: !TypeRep
+    , pveph_weak :: {-# UNPACK #-} !(Weak (TVar a))
+    } 
+type PVEphMap = IntMap PVEph
 
 --     dropPVar   :: VCache -> ByteString -> VTx ()
 
@@ -156,11 +156,11 @@ data VSpace = VSpace
 
     -- LMDB contents. 
     , vcache_db_env     :: !MDB_env
-    , vcache_db_values  :: {-# UNPACK #-} !MDB_dbi' -- address → value
-    , vcache_db_vroots  :: {-# UNPACK #-} !MDB_dbi' -- bytes → address 
+    , vcache_db_memory  :: {-# UNPACK #-} !MDB_dbi' -- address → value
+    , vcache_db_vroots  :: {-# UNPACK #-} !MDB_dbi' -- path → address 
     , vcache_db_caddrs  :: {-# UNPACK #-} !MDB_dbi' -- hashval → [address]
     , vcache_db_refcts  :: {-# UNPACK #-} !MDB_dbi' -- address → Word64
-    , vcache_db_refct0  :: {-# UNPACK #-} !MDB_dbi' -- address (queue, unsorted?)
+    , vcache_db_refct0  :: {-# UNPACK #-} !MDB_dbi' -- address → ()
 
     , vcache_mem_vrefs  :: {-# UNPACK #-} !(IORef EphMap) -- track VRefs in memory
     , vcache_mem_pvars  :: {-# UNPACK #-} !(IORef PVEphMap) -- track PVars in memory
@@ -283,25 +283,18 @@ data WriteVal = WriteVal
 --   thread unless the PVar transaction must be durable.
 --
 
--- | The VTx transactions build upon STM, and allow use of arbitrary
--- PVars in addition to STM resources. 
+-- | The VTx transactions allow atomic updates to both PVars and STM
+-- resources, providing a simple basis for consistency between the
+-- persistent and ephemeral resources.
 --
--- VTx transactions on a single VCache can support the full atomic,
--- consistent, isolated, and durable (ACID) properties. However, 
--- durability is optional, and non-durable transactions may observe 
--- data that has been committed but is not fully persisted to disk.
--- Essentially, durability involves an extra wait (before returning)
--- for `fsync` to disk. Only durable transactions will wait.
---
--- A transaction involving PVars from multiple VCache objects is
--- possible, but full ACID is not supported: if the Haskell process
--- crashes between persisting the different underlying files, they
--- will become mutually inconsistent (though will still have internal
--- consistency).
--- 
--- VCache will aggregate multiple transactions that occur around
--- the same time, amortizing synchronization costs for bursts of
--- updates (common in many domains).
+-- Durability is optional: when a VTx transaction completes, a batch
+-- of updates will be commited to disk by a background thread. Many
+-- transactions from around the same time will be aggregated by the
+-- writer, to amortize synchronization costs. A durable transaction
+-- will wait until the writer signals that everything is backed by
+-- the filesystem. A non-durable transaction will not wait, but may
+-- read and write values without guarantee that they are backed to
+-- disk.
 -- 
 newtype VTx a = VTx { _vtx :: StateT WriteLog STM a }
     deriving (Monad, Functor, Applicative, Alternative, MonadPlus)
