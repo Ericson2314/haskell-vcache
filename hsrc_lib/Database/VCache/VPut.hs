@@ -5,7 +5,7 @@ module Database.VCache.VPut
     ( VPut
 
     -- * Prim Writers
-    , putVRef
+    , putVRef, putPVar
     , putWord8
     , putWord16le, putWord16be
     , putWord32le, putWord32be

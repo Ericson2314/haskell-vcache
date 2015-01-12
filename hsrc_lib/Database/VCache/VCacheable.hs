@@ -56,6 +56,12 @@ instance (VCacheable a) => VCacheable (VRef a) where
     {-# INLINE get #-}
     {-# INLINE put #-}
 
+instance (VCacheable a) => VCacheable (PVar a) where
+    get = getPVar
+    put = putPVar
+    {-# INLINE get #-}
+    {-# INLINE put #-}
+
 -- unit is not actually serialized.
 instance VCacheable () where
     get = return ()

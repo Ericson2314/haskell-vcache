@@ -4,7 +4,7 @@ module Database.VCache.VGet
     ( VGet
 
     -- * Prim Readers
-    , getVRef
+    , getVRef, getPVar
     , getWord8
     , getWord16le, getWord16be
     , getWord32le, getWord32be
@@ -120,8 +120,12 @@ getVRef = VGet $ \ s ->
 {-# INLINABLE getVRef #-}
 
 -- | Load a PVar, just the variable. Content is loaded lazily on first
--- read. User must know which type of values to load. Attempting to open
--- one PVar with two types (via Typeable) results in a runtime error.
+-- read, then kept in memory until the PVar is GC'd. Unlike other Haskell
+-- variables, PVars can be serialized to the VCache address space.  
+--
+-- A PVar may be loaded more than once. All instances refer to the same
+-- underlying TVar. All instances of a PVar must have the same TypeRep
+-- (via Data.Typeable) or a runtime error will be raised.
 getPVar :: (VCacheable a) => VGet (PVar a) 
 getPVar = VGet $ \ s ->
     case (vget_children s) of

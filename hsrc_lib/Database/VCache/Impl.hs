@@ -59,6 +59,7 @@ loadMemCache _dummy space addr = atomicModifyIORef mcrf loadCache where
         let addEph = Just . (eph:) . maybe [] id
         let mc' = IntMap.alter addEph hkey mc 
         return (mc',c)
+{-# NOINLINE loadMemCache #-}
 
 -- this is a bit of a hack... it is unsafe in general, since
 -- Eph doesn't track the type `a`. We'll coerce it, assuming
@@ -90,7 +91,7 @@ hashVRef (TypeRep (Fingerprint a b) _ _) addr = hA + hB + hAddr where
     p_100 = 541
     p_1000 = 7919
     p_10k = 104729
-
+{-# INLINE hashVRef #-}
 
 
 -- | Obtain a PVar given an address
@@ -128,12 +129,14 @@ loadPVarData _dummy space addr = atomicModifyIORef pvtbl loadData where
         let addEph = Just . (eph:) . maybe [] id
         let mpv' = IntMap.alter addEph hkey mpv
         return (mpv', d)
+{-# NOINLINE loadPVarData #-}
 
 _unsafeDataWeak :: PVEph -> Weak (TVar (RDV a))
 _unsafeDataWeak (PVEph { pveph_weak = w }) = _unsafeCoerceWeakData w
+{-# INLINE _unsafeDataWeak #-}
 
 _unsafeCoerceWeakData :: Weak (TVar (RDV b)) -> Weak (TVar (RDV a))
 _unsafeCoerceWeakData = unsafeCoerce
-
+{-# INLINE _unsafeCoerceWeakData #-}
 
 
