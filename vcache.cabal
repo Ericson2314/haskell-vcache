@@ -57,7 +57,7 @@ Library
     , bytestring
     , transformers
     , containers
-    , stm
+    , stm (>= 2.4.3)
     , lmdb
     , filelock, easy-file
 

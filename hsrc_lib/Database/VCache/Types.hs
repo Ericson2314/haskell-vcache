@@ -2,19 +2,20 @@
 
 -- Internal file. Lots of types. Lots of coupling.
 module Database.VCache.Types
-    ( Address
-    , VRef(..), Cache(..), VRef_(..)
+    ( Address, isVRefAddr, isPVarAddr
+    , VRef(..), Cache(..)
     , Eph(..), EphMap 
-    , PVar(..)
+    , PVar(..), RDV
     , PVEph(..), PVEphMap
     , VTx(..), TxW(..)
     , VCache(..)
     , VSpace(..)
-    , VPut(..), VPutS(..), VPutR(..)
+    , VPut(..), VPutS(..), VPutR(..), PutChild(..)
     , VGet(..), VGetS(..), VGetR(..)
     , VCacheable(..)
     ) where
 
+import Data.Bits
 import Data.Word
 import Data.Function (on)
 import Data.Typeable
@@ -35,6 +36,13 @@ import Foreign.Ptr
 
 -- | An address in the VCache address space
 type Address = Word64 -- with '0' as special case
+
+-- | VRefs and PVars are divided among odds and evens.
+isVRefAddr, isPVarAddr :: Address -> Bool
+isVRefAddr addr = (0 == (1 .&. addr))
+isPVarAddr = not . isVRefAddr
+{-# INLINE isVRefAddr #-}
+{-# INLINE isPVarAddr #-}
 
 -- | A VRef is an opaque reference to an immutable value stored in an
 -- auxiliary address space backed by the filesystem (via LMDB). VRef 
@@ -62,7 +70,6 @@ data VRef a = VRef
     , vref_parse  :: !(VGet a)                          -- ^ parser for this VRef
     } deriving (Typeable)
 instance Eq (VRef a) where (==) = (==) `on` vref_cache
-data VRef_ = forall a . VRef_ !(VRef a) -- VRef without type information.
 
 -- For every VRef we have in memory, we need an ephemeron in a table.
 -- This ephemeron table supports structure sharing, caching, and GC.
@@ -96,42 +103,44 @@ data Cache a
 --     otherwise, touch counter for timing by GC
 --
 
--- | A PVar is a mutable variable backed by VCache, and which thus
--- may be referenced through cached values. PVars are transactional,
--- allowing atomic, consistent, isolated, and durable (ACID) updates.
+-- | A PVar is a mutable variable backed by VCache, and which may be
+-- referenced by cached values. PVars support ACID transactions like
+-- TVars, and may be used together with TVars.
 --
--- PVars are not cached. Holding onto a PVar will lock its value in
--- Haskell memory. Cached variables must be modeled explicitly, by
--- having a PVar contain a VRef. However, the first read of a PVar is
--- lazy to avoid recursion when parsing values.
+-- Unlike VRefs, PVars are not cached. They should be treated as in
+-- memory variables, at least after the first read. Their first read
+-- is lazy, such that a PVar is not parsed or loaded if not used. A
+-- PVar must contain VRefs to support caching or structure sharing.
 --
--- VCache supplies a table of 'named root' PVars, which form the basis
--- for persistence. These root PVars may be accessed by stable name 
--- from one execution of the application to another. The idea is that
--- roots should provide just a little shallow structure, while deeper
--- structure is modeled in the Haskell type system and values.
+-- In addition to anonymous PVars, VCache supports named global roots
+-- for persistence. Further, a simplistic filesystem-like structure 
+-- enables subprograms to each have a fresh namespace. Named PVars are
+-- the foundation for persistence. 
 -- 
 -- Developers must be careful with respect to cyclic references among
 -- PVars. The VCache garbage collector uses reference counting because
--- it scales nicely to very large content. But cyclic references will
+-- it scales nicely to very large content, but cyclic references will
 -- stymie this simplistic algorithm. Cycles must be avoided or broken
 -- to avoid leaking disk space.
--- 
+--
 data PVar a = PVar
     { pvar_addr  :: {-# UNPACK #-} !Address
-    , pvar_data  :: {-# UNPACK #-} !(TVar a)
+    , pvar_data  :: {-# UNPACK #-} !(TVar (RDV a))
     , pvar_write :: !(a -> VPut ())
     , pvar_space :: !VSpace
     } deriving (Typeable)
 instance Eq (PVar a) where (==) = (==) `on` pvar_data
+
+-- ephemeron table for PVars.
 data PVEph = forall a . PVEph
     { pveph_addr :: {-# UNPACK #-} !Address
     , pveph_type :: !TypeRep
-    , pveph_weak :: {-# UNPACK #-} !(Weak (TVar a))
+    , pveph_weak :: {-# UNPACK #-} !(Weak (TVar (RDV a)))
     } 
-type PVEphMap = IntMap PVEph
+type PVEphMap = IntMap [PVEph]
 
---     dropPVar   :: VCache -> ByteString -> VTx ()
+-- Left iff not read.
+type RDV a = Either (VGet a) a
 
 
 -- | VCache supports a filesystem-backed address space with persistent 
@@ -171,6 +180,9 @@ data VSpace = VSpace
     -- share persistent variables for safe STM
 
     -- Further, I need...
+    --   log or queue of 'new' vrefs and pvars, 
+    --     including those still being written
+    --   semaphore to block writer on older readers
     --   a thread performing writes and incremental GC
     --   a channel to talk to that thread
     --   queue of MVars waiting on synchronization/flush.
@@ -304,7 +316,7 @@ newtype VTx a = VTx { _vtx :: StateT WriteLog STM a }
     -- commits. Serialization is lazy to better support batching. 
 
 type WriteLog  = [TxW]
-data TxW = forall a . TxW !(PVar a) (VPut ())
+data TxW = forall a . TxW !(PVar a) a
     -- note: PVars should not be GC'd before written to disk. An
     -- alternative is that `loadPVar` waits on active writes, or
     -- accesses the global write log. But it's easiest to simply
@@ -324,16 +336,17 @@ type PtrLoc = Ptr8
 -- `reserve` to allocate enough bytes.
 newtype VPut a = VPut { _vput :: VPutS -> IO (VPutR a) }
 data VPutS = VPutS 
-    { vput_space    :: !VSpace
-    , vput_children :: ![VRef_]
-    , vput_buffer   :: !(IORef PtrIni)
-    , vput_target   :: {-# UNPACK #-} !PtrLoc
-    , vput_limit    :: {-# UNPACK #-} !PtrEnd
+    { vput_space    :: !VSpace 
+    , vput_children :: ![PutChild] -- ^ addresses written
+    , vput_buffer   :: !(IORef PtrIni) -- ^ current buffer for easy free
+    , vput_target   :: {-# UNPACK #-} !PtrLoc -- ^ location within buffer
+    , vput_limit    :: {-# UNPACK #-} !PtrEnd -- ^ current limit for input
     }
     -- note: vput_buffer is an IORef mostly to simplify error handling.
     --  On error, we'll need to free the buffer. However, it may be 
     --  reallocated many times during serialization of a large value,
     --  so we need easy access to the final value.
+data PutChild = forall a . PutChild (Either (PVar a) (VRef a))
 
 data VPutR r = VPutR
     { vput_result :: r
@@ -433,11 +446,7 @@ instance MonadPlus VGet where
 -- 
 -- Under the hood, structured data is serialized as the pair:
 --
---    (ByteString,[VRef])
---
--- This separation is mostly to simplify garbage collection. However,
--- it also means there is no risk of reading VRef addresses as binary
--- data, nor vice versa. 
+--    (ByteString,[Either VRef PVar])
 --
 -- Developers must ensure that `get` on the output of `put` will return
 -- an equivalent value. If a data type isn't stable, developers should

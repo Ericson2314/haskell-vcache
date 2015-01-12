@@ -75,28 +75,44 @@ putWord8 w8 = reserving 1 $ unsafePutWord8 w8
 unsafePutWord8 :: Word8 -> VPut ()
 unsafePutWord8 w8 = VPut $ \ s -> 
     let pTgt = vput_target s in
-    poke pTgt w8 >>
     let s' = s { vput_target = (pTgt `plusPtr` 1) } in
+    poke pTgt w8 >>
     return (VPutR () s')
 {-# INLINE unsafePutWord8 #-}
 
--- | Store a reference to a value, which must already be part of the
--- destination's address space. Usually, you should open only one 
--- VCache, so this should not be a problem. Values must not be moved
--- between spaces without explicit copy. 
+-- | Store a reference to a value. The value reference must already
+-- use the same VCache and addres space as where you're putting it.
 putVRef :: VRef a -> VPut ()
-putVRef r = VPut $ \ s ->
-    if (vput_space s == vref_space r) then _putVRef s (VRef_ r) else
-    fail $ "putVRef' argument is not from destination VCache" 
-{-# INLINE putVRef #-}
+putVRef ref = VPut $ \ s ->
+    if (vput_space s == vref_space ref) then _putVRef s ref else
+    fail $ "putVRef argument is not from destination VCache" 
+{-# INLINABLE putVRef #-}
 
 -- assuming destination and ref have same address space
-_putVRef :: VPutS -> VRef_ -> IO (VPutR ())
-_putVRef s r = 
-    let vs = vput_children s in
-    let s' = s { vput_children = (r:vs) } in
+_putVRef :: VPutS -> VRef a -> IO (VPutR ())
+_putVRef s ref = 
+    let cs = vput_children s in
+    let c  = PutChild (Right ref) in
+    let s' = s { vput_children = (c:cs) } in
     return (VPutR () s')
 {-# INLINE _putVRef #-}
+
+-- | Store an identifier for a persistent variable in the same VCache
+-- and address space.
+putPVar :: PVar a -> VPut ()
+putPVar pvar = VPut $ \ s ->
+    if (vput_space s == pvar_space pvar) then _putPVar s pvar else 
+    fail $ "putPVar argument is not from destination VCache"
+{-# INLINABLE putPVar #-}
+
+-- assuming destination and var have same address space
+_putPVar :: VPutS -> PVar a -> IO (VPutR ())
+_putPVar s pvar = 
+    let cs = vput_children s in
+    let c  = PutChild (Left pvar) in
+    let s' = s { vput_children = (c:cs) } in
+    return (VPutR () s')
+{-# INLINE _putPVar #-}
 
 -- | Put a Word in little-endian or big-endian form.
 --
@@ -119,27 +135,29 @@ reserving n op = reserve n >> op
 {-# RULES
 "reserving >> reserving" forall n1 n2 f g . reserving n1 f >> reserving n2 g = reserving (n1+n2) (f>>g)
  #-}
+{-# INLINABLE reserving #-}
 
 putWord16le w = reserving 2 $ VPut $ \ s -> do
     let p = vput_target s
+    let s' = s { vput_target = (p `plusPtr` 2) }
     poke (p            ) (fromIntegral (w           ) :: Word8)
     poke (p `plusPtr` 1) (fromIntegral (w `shiftR` 8) :: Word8)
-    let s' = s { vput_target = (p `plusPtr` 2) }
     return (VPutR () s')
 {-# INLINE putWord16le #-}
 
 putWord32le w = reserving 4 $ VPut $ \ s -> do
     let p = vput_target s
+    let s' = s { vput_target = (p `plusPtr` 4) }
     poke (p            ) (fromIntegral (w            ) :: Word8)
     poke (p `plusPtr` 1) (fromIntegral (w `shiftR`  8) :: Word8)
     poke (p `plusPtr` 2) (fromIntegral (w `shiftR` 16) :: Word8)
     poke (p `plusPtr` 3) (fromIntegral (w `shiftR` 24) :: Word8)
-    let s' = s { vput_target = (p `plusPtr` 4) }
     return (VPutR () s')
 {-# INLINE putWord32le #-}
 
 putWord64le w = reserving 8 $ VPut $ \ s -> do
     let p = vput_target s
+    let s' = s { vput_target = (p `plusPtr` 8) }
     poke (p            ) (fromIntegral (w            ) :: Word8)
     poke (p `plusPtr` 1) (fromIntegral (w `shiftR`  8) :: Word8)
     poke (p `plusPtr` 2) (fromIntegral (w `shiftR` 16) :: Word8)
@@ -148,30 +166,30 @@ putWord64le w = reserving 8 $ VPut $ \ s -> do
     poke (p `plusPtr` 5) (fromIntegral (w `shiftR` 40) :: Word8)
     poke (p `plusPtr` 6) (fromIntegral (w `shiftR` 48) :: Word8)
     poke (p `plusPtr` 7) (fromIntegral (w `shiftR` 56) :: Word8)
-    let s' = s { vput_target = (p `plusPtr` 8) }
     return (VPutR () s')
 {-# INLINE putWord64le #-}
 
 putWord16be w = reserving 2 $ VPut $ \ s -> do
     let p = vput_target s
+    let s' = s { vput_target = (p `plusPtr` 2) }
     poke (p            ) (fromIntegral (w `shiftR` 8) :: Word8)
     poke (p `plusPtr` 1) (fromIntegral (w           ) :: Word8)
-    let s' = s { vput_target = (p `plusPtr` 2) }
     return (VPutR () s')
 {-# INLINE putWord16be #-}
 
 putWord32be w = reserving 4 $ VPut $ \ s -> do
     let p = vput_target s
+    let s' = s { vput_target = (p `plusPtr` 4) }
     poke (p            ) (fromIntegral (w `shiftR` 24) :: Word8)
     poke (p `plusPtr` 1) (fromIntegral (w `shiftR` 16) :: Word8)
     poke (p `plusPtr` 2) (fromIntegral (w `shiftR`  8) :: Word8)
     poke (p `plusPtr` 3) (fromIntegral (w            ) :: Word8)
-    let s' = s { vput_target = (p `plusPtr` 4) }
     return (VPutR () s')
 {-# INLINE putWord32be #-}
 
 putWord64be w = reserving 8 $ VPut $ \ s -> do
     let p = vput_target s
+    let s' = s { vput_target = (p `plusPtr` 8) }
     poke (p            ) (fromIntegral (w `shiftR` 56) :: Word8)
     poke (p `plusPtr` 1) (fromIntegral (w `shiftR` 48) :: Word8)
     poke (p `plusPtr` 2) (fromIntegral (w `shiftR` 40) :: Word8)
@@ -180,7 +198,6 @@ putWord64be w = reserving 8 $ VPut $ \ s -> do
     poke (p `plusPtr` 5) (fromIntegral (w `shiftR` 16) :: Word8)
     poke (p `plusPtr` 6) (fromIntegral (w `shiftR`  8) :: Word8)
     poke (p `plusPtr` 7) (fromIntegral (w            ) :: Word8)
-    let s' = s { vput_target = (p `plusPtr` 8) }
     return (VPutR () s')
 {-# INLINE putWord64be #-}
 
@@ -200,7 +217,7 @@ putStorable a =
             poke pA a
             copyBytes pTgt (castPtr pA) n
             return (VPutR () s')
-{-# INLINE putStorable #-}
+{-# INLINABLE putStorable #-}
 
 -- | Put an arbitrary integer in a 'varint' format associated with
 -- Google protocol buffers with zigzag encoding of negative numbers.
@@ -265,6 +282,7 @@ _putByteString (BSI.PS fpSrc p_off p_len) =
         copyBytes pDst (pSrc `plusPtr` p_off) p_len
         let s' = s { vput_target = (pDst `plusPtr` p_len) }
         return (VPutR () s')
+{-# INLINABLE _putByteString #-}
 
 -- | Put a character in UTF-8 format.
 putc :: Char -> VPut ()

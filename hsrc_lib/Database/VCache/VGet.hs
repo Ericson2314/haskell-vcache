@@ -96,7 +96,7 @@ consuming n op = VGet $ \ s ->
 "consuming>>consuming"  forall n1 n2 f g . consuming n1 f >> consuming n2 g = consuming (n1+n2) (f>>g)
 "consuming>>=consuming" forall n1 n2 f g . consuming n1 f >>= consuming n2 . g = consuming (n1+n2) (f>>=g)
  #-}
-{-# INLINE consuming #-}
+{-# INLINABLE consuming #-}
 
 -- | Read one byte of data, or fail if not enough data.
 getWord8 :: VGet Word8 
@@ -107,18 +107,30 @@ getWord8 = consuming 1 $ VGet $ \ s -> do
     return (VGetR r s')
 {-# INLINE getWord8 #-}
 
--- | Read a VRef. VCache assumes you know the type for referenced
--- child values, e.g. due to bytes written prior. Fails if there 
--- aren't enough child references in the input.
+-- | Load a VRef, just the reference rather than the content. User must
+-- know which type of value. VRef content is not read until deref. 
 getVRef :: (VCacheable a) => VGet (VRef a)
 getVRef = VGet $ \ s -> 
     case (vget_children s) of
-        [] -> return (VGetE "not enough children")
-        (c:cs) -> do
+        (c:cs) | isVRefAddr c -> do
             let s' = s { vget_children = cs }
             r <- addr2vref (vget_space s) c
             return (VGetR r s')
-{-# INLINE getVRef #-}
+        _ -> return (VGetE "could not parse value reference")
+{-# INLINABLE getVRef #-}
+
+-- | Load a PVar, just the variable. Content is loaded lazily on first
+-- read. User must know which type of values to load. Attempting to open
+-- one PVar with two types (via Typeable) results in a runtime error.
+getPVar :: (VCacheable a) => VGet (PVar a) 
+getPVar = VGet $ \ s ->
+    case (vget_children s) of
+        (c:cs) | isPVarAddr c -> do
+            let s' = s { vget_children = cs }
+            r <- addr2pvar (vget_space s) c
+            return (VGetR r s')
+        _ -> return (VGetE "could not parse persistent variable id")
+{-# INLINABLE getPVar #-}
 
 -- | Read words of size 16, 32, or 64 in little-endian or big-endian.
 getWord16le, getWord16be :: VGet Word16

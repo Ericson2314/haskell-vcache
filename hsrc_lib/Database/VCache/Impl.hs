@@ -1,8 +1,7 @@
 
 -- primary implementation of VCache (might break up later)
 module Database.VCache.Impl 
-    ( addr2vref
-    , loadMemCache
+    ( addr2vref, addr2pvar
     ) where
 
 import Data.IORef
@@ -16,6 +15,8 @@ import Database.VCache.Types
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.List as L
+
+import Control.Concurrent.STM.TVar
 
 import System.Mem.Weak (Weak)
 import qualified System.Mem.Weak as Weak
@@ -78,6 +79,9 @@ _unsafeCoerceWeakCache = unsafeCoerce
 -- In this case, I want to include the type representation
 -- because address collisions are quite possible for many
 -- different types.
+--
+-- By comparison, PVars don't use typerep for hashing;
+-- multiple typereps for one address is illegal anyway.
 hashVRef :: TypeRep -> Address -> Int
 hashVRef (TypeRep (Fingerprint a b) _ _) addr = hA + hB + hAddr where
     hA = p_10k * fromIntegral a 
@@ -86,6 +90,50 @@ hashVRef (TypeRep (Fingerprint a b) _ _) addr = hA + hB + hAddr where
     p_100 = 541
     p_1000 = 7919
     p_10k = 104729
+
+
+
+-- | Obtain a PVar given an address
+addr2pvar :: (VCacheable a) => VSpace -> Address -> IO (PVar a)
+addr2pvar space addr =
+    loadPVarData undefined space addr >>= \ pvdata ->
+    return $! PVar
+        { pvar_addr = addr
+        , pvar_data = pvdata
+        , pvar_space = space
+        , pvar_write = put
+        }
+{-# INLINE addr2pvar #-}
+
+loadPVarData :: (VCacheable a) => a -> VSpace -> Address -> IO (TVar (RDV a))
+loadPVarData _dummy space addr = atomicModifyIORef pvtbl loadData where
+    pvtbl = vcache_mem_pvars space
+    typa = typeOf _dummy
+    hkey = fromIntegral addr
+    match eph = (addr == pveph_addr eph)
+    getData = unsafeDupablePerformIO . Weak.deRefWeak . _unsafeDataWeak
+    loadData mpv = case IntMap.lookup hkey mpv >>= L.find match of
+        Just e ->
+            if (pveph_type e == typa) then tryEph mpv e else
+            error "PVar error: multiple types for single address" 
+        Nothing -> newData mpv
+    tryEph mpv eph = case getData eph of
+        Just d -> (mpv, d)
+        Nothing -> newData mpv
+    newData = unsafePerformIO . initData
+    initData mpv = do
+        d <- newTVarIO (Left get)
+        wd <- mkWeakTVar d (return ())
+        let eph = PVEph { pveph_addr = addr, pveph_type = typa, pveph_weak = wd }
+        let addEph = Just . (eph:) . maybe [] id
+        let mpv' = IntMap.alter addEph hkey mpv
+        return (mpv', d)
+
+_unsafeDataWeak :: PVEph -> Weak (TVar (RDV a))
+_unsafeDataWeak (PVEph { pveph_weak = w }) = _unsafeCoerceWeakData w
+
+_unsafeCoerceWeakData :: Weak (TVar (RDV b)) -> Weak (TVar (RDV a))
+_unsafeCoerceWeakData = unsafeCoerce
 
 
 
