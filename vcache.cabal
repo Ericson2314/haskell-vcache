@@ -70,6 +70,8 @@ Library
   Other-Modules:
     Database.VCache.Types
     Database.VCache.Impl
+    Database.VCache.RWLock
+    -- Database.VCache.Semaphore
     Database.VCache.Hash
    
   ghc-options: -Wall -auto-all

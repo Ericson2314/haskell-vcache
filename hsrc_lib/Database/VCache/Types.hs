@@ -171,8 +171,11 @@ data VSpace = VSpace
     , vcache_db_refcts  :: {-# UNPACK #-} !MDB_dbi' -- address → Word64
     , vcache_db_refct0  :: {-# UNPACK #-} !MDB_dbi' -- address → ()
 
+    --, vcache_db_rwlock  :: {-# UNPACK #-} !RWLock
+
     , vcache_mem_vrefs  :: {-# UNPACK #-} !(IORef EphMap) -- track VRefs in memory
     , vcache_mem_pvars  :: {-# UNPACK #-} !(IORef PVEphMap) -- track PVars in memory
+
 
     -- requested weight limit for cached values
     -- , vcache_weightlim  :: {-# UNPACK #-} !(IORef Int)
@@ -190,6 +193,9 @@ data VSpace = VSpace
     }
 
 instance Eq VSpace where (==) = (==) `on` vcache_lockfile
+
+
+
 
 -- action: write a value to the database.
 {-
@@ -448,10 +454,9 @@ instance MonadPlus VGet where
 --
 --    (ByteString,[Either VRef PVar])
 --
--- Developers must ensure that `get` on the output of `put` will return
--- an equivalent value. If a data type isn't stable, developers should
--- consider adding some version information (cf. SafeCopy package) and
--- ensuring backwards compatibility of `get`.
+-- Developers must ensure that `get` on the serialization from `put` 
+-- returns the same value. And `get` must be backwards compatible.
+-- Developers should consider version wrappers, cf. SafeCopy package.
 -- 
 class (Typeable a) => VCacheable a where 
     -- | Serialize a value as a stream of bytes and value references. 
