@@ -25,12 +25,14 @@ vcacheStats (VCache vc _) = withRdOnlyLock (vcache_db_rwlock vc) $ do
     mdb_txn_abort txnStat
     memVRefsMap <- readIORef (vcache_mem_vrefs vc)
     memPVarsMap <- readIORef (vcache_mem_pvars vc)
+    allocSt <- readIORef (vcache_allocator vc)
     let fileSize = (fromIntegral $ me_last_pgno envInfo) * (fromIntegral $ ms_psize envStat)
     let vrefCount = (fromIntegral $ ms_entries hashStat) 
     let pvarCount = (fromIntegral $ ms_entries memStat) - vrefCount
     let rootCount = (fromIntegral $ ms_entries rootStat)
     let memVRefs = IntMap.size memVRefsMap
     let memPVars = IntMap.size memPVarsMap
+    let allocPos = allocSt
     return $! VCacheStats
         { vcstat_file_size = fileSize
         , vcstat_vref_count = vrefCount
@@ -38,5 +40,6 @@ vcacheStats (VCache vc _) = withRdOnlyLock (vcache_db_rwlock vc) $ do
         , vcstat_root_count = rootCount
         , vcstat_mem_vref = memVRefs
         , vcstat_mem_pvar = memPVars
+        , vcstat_alloc_pos = allocPos
         }
 

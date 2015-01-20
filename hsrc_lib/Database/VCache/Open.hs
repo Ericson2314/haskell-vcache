@@ -72,7 +72,7 @@ vcRootPath = BS.empty
 -- Default address for allocation. We start this high to help 
 -- regulate serialization sizes and simplify debugging.
 vcAllocStart :: Address 
-vcAllocStart = (1024 * 1024 * 1024) - 1
+vcAllocStart = 9999999
 
 
 openVC' :: Int -> FileLock -> FilePath -> IO VCache

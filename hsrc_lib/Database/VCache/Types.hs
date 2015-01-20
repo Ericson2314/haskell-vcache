@@ -219,17 +219,19 @@ instance Eq VSpace where (==) = (==) `on` vcache_lockfile
 -- I think we can leverage the RWLock and frame buffering model. A 
 -- writer for frame N (next frame) may operate concurrently with 
 -- readers on frames N-1 (current frame) and N-2 (previous frame).
--- Meanwhile, after we choose how much to write, further content
--- will be delayed to frame N+1.
+-- Meanwhile, after we choose how much to write in one frame, new
+-- content must be delayed to frame N+1.
 --
--- A reader at frame N will certainly see content written by that
+-- A reader at frame N will (by definition) see content written by that
 -- frame. Thus, a reader at frame N-2 will only need to read buffers
 -- for content added in frames N-1, N, N+1. Otherwise, it can depend
 -- on the database. This suggests having three buffers for data, with
 -- the writer always operating on content from the middle buffer and
 -- new content always being added to the N+1 buffer. The writer will
--- form a fresh N+1 buffer and shift stuff around as needed.
+-- form a fresh N+1 buffer and shift stuff backwards as needed.
 --  
+
+
 
 
 -- action: write a value to the database.
@@ -346,6 +348,7 @@ data VCacheStats = VCacheStats
         , vcstat_root_count     :: {-# UNPACK #-} !Int  -- ^ number of named roots (a subset of PVars)
         , vcstat_mem_vref       :: {-# UNPACK #-} !Int  -- ^ number of VRefs in Haskell process memory
         , vcstat_mem_pvar       :: {-# UNPACK #-} !Int  -- ^ number of PVars in Haskell process memory
+        , vcstat_alloc_pos      :: {-# UNPACK #-} !Address -- ^ address to be used by allocator
         } deriving (Show, Ord, Eq)
 
 
