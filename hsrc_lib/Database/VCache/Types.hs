@@ -10,6 +10,7 @@ module Database.VCache.Types
     , VTx(..), TxW(..)
     , VCache(..)
     , VSpace(..)
+    , VCacheStats(..)
     , VPut(..), VPutS(..), VPutR(..), PutChild(..)
     , VGet(..), VGetS(..), VGetR(..)
     , VCacheable(..)
@@ -21,7 +22,7 @@ import Data.Function (on)
 import Data.Typeable
 import Data.IORef
 import Data.IntMap.Strict (IntMap)
-import Data.Map.Strict (Map)
+-- import Data.Map.Strict (Map)
 import Data.ByteString (ByteString)
 import Control.Monad
 import Control.Monad.STM (STM)
@@ -33,6 +34,7 @@ import System.Mem.Weak (Weak)
 import System.FileLock (FileLock)
 import Database.LMDB.Raw
 import Foreign.Ptr
+import Foreign.Marshal.Alloc
 
 import Database.VCache.RWLock
 
@@ -178,6 +180,11 @@ data VSpace = VSpace
     , vcache_mem_vrefs  :: {-# UNPACK #-} !(IORef EphMap) -- track VRefs in memory
     , vcache_mem_pvars  :: {-# UNPACK #-} !(IORef PVEphMap) -- track PVars in memory
 
+    -- For now, just an address. Eventually, I'll want to track all recent
+    -- writes for values at least (for structure sharing), and possibly for
+    -- new PVars. 
+    , vcache_allocator  :: !(IORef Address)
+
 
     -- requested weight limit for cached values
     -- , vcache_weightlim  :: {-# UNPACK #-} !(IORef Int)
@@ -197,6 +204,33 @@ data VSpace = VSpace
 instance Eq VSpace where (==) = (==) `on` vcache_lockfile
 
 
+-- Question: How do we prevent a VRef from being constructed 
+-- twice with two different addresses?
+--
+-- The issue: If two agents try to construct the same VRef at 
+-- around the same time, both will first search the database
+-- before checking or updating the recent allocations list. 
+-- There may be a race condition where the second agent checks
+-- the database while the value is in the allocations list, then
+-- checks the allocations list while the value is now in the 
+-- database.
+--
+-- How to guard against this race condition? 
+--
+-- I think we can leverage the RWLock and frame buffering model. A 
+-- writer for frame N (next frame) may operate concurrently with 
+-- readers on frames N-1 (current frame) and N-2 (previous frame).
+-- Meanwhile, after we choose how much to write, further content
+-- will be delayed to frame N+1.
+--
+-- A reader at frame N will certainly see content written by that
+-- frame. Thus, a reader at frame N-2 will only need to read buffers
+-- for content added in frames N-1, N, N+1. Otherwise, it can depend
+-- on the database. This suggests having three buffers for data, with
+-- the writer always operating on content from the middle buffer and
+-- new content always being added to the N+1 buffer. The writer will
+-- form a fresh N+1 buffer and shift stuff around as needed.
+--  
 
 
 -- action: write a value to the database.
@@ -302,6 +336,19 @@ data WriteVal = WriteVal
 --   other STM variables at runtime. There is also no waiting on the write
 --   thread unless the PVar transaction must be durable.
 --
+
+-- | Miscellaneous statistics for a VCache instance. These can be 
+-- computed at runtime.
+data VCacheStats = VCacheStats
+        { vcstat_txn_count      :: {-# UNPACK #-} !Int  -- ^ number of transactions to reach current state
+        , vcstat_file_size      :: {-# UNPACK #-} !Int  -- ^ estimated file size in bytes
+        , vcstat_vref_count     :: {-# UNPACK #-} !Int  -- ^ number of immutable values in the database
+        , vcstat_pvar_count     :: {-# UNPACK #-} !Int  -- ^ number of mutable PVars in the database
+        , vcstat_root_count     :: {-# UNPACK #-} !Int  -- ^ number of named roots (a subset of PVars)
+        , vcstat_mem_vref       :: {-# UNPACK #-} !Int  -- ^ number of VRefs in Haskell process memory
+        , vcstat_mem_pvar       :: {-# UNPACK #-} !Int  -- ^ number of PVars in Haskell process memory
+        } deriving (Show, Ord, Eq)
+
 
 -- | The VTx transactions allow atomic updates to both PVars and STM
 -- resources, providing a simple basis for consistency between the

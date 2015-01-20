@@ -39,10 +39,11 @@ Multiple VCache instances won't work together very nicely. PVars cannot be share
 
 VCache does not support concurrent instances and mustn't be used for inter-process communication. The LMDB layer uses the `MDB_NOLOCK` flag, and important components (STM, GC) are process local anyway. Without reader locks, the `mdb_copy` utility won't work on a running LMDB database. VCache does use a coarse grained lockfile to resist accidental concurrency (i.e. if you start the app twice with the same LMDB backing file, one of the two should wait briefly on the lock then fail). 
 
-VCache doesn't provide any type versioning features comparable to the `SafeCopy` class used by acid-state. Developers should either ensure backwards compatibility by hand (e.g. by including type version information for unstable types) or develop a variation of SafeCopy for VCache.
+VCache doesn't enforce any type versioning features comparable to the `SafeCopy` class used by acid-state. Developers should either ensure backwards compatibility by hand (e.g. by including type version information for unstable types) or develop a variation of SafeCopy for VCache.
 
 Transactions use optimistic concurrency. While this has many advantages, a stream of short transactions may starve a long running read-write transaction. Where heavy contention is anticipated or observed, developers should utilize external synchronization or cooperation patterns to reduce conflict, such as queues and channels and so on. 
 
-You need a 64-bit system to effectively leverage VCache. LMDB is memory mapped, and thus is limited by address space. 
+LMDB is memory mapped, and thus is limited by address space. To be used effectively, LMDB requires an address space much larger than available memory.
 
-LMDB files are not very portable. Endianness and sensitivity to filesystem block sizes may interfere with porting LMDB files.
+VCache does not provide search, query, indexing, joins, import or export, replication or sharding, and other database features. VCache shouldn't be considered a replacement for a database. It might be a suitable basis for implementing ad-hoc application specific databases, but any such database should have its own dedicated Haskell packages. The ability to model persistent interactions without requiring a database can usefully reduce burden on 'real' databases.
+

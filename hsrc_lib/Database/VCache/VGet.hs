@@ -29,7 +29,7 @@ import Data.Char
 import Data.Word
 import Foreign.Ptr (plusPtr,castPtr,Ptr)
 import Foreign.Storable (Storable(..))
-import Foreign.Marshal.Alloc (alloca,mallocBytes,finalizerFree)
+import Foreign.Marshal.Alloc (mallocBytes,finalizerFree)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.ForeignPtr (newForeignPtr)
 
@@ -39,6 +39,7 @@ import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Lazy as LBS
 
 import Database.VCache.Types
+import Database.VCache.Aligned
 import Database.VCache.Impl
 
 
@@ -249,13 +250,11 @@ getStorable = _getStorable undefined
 _getStorable :: (Storable a) => a -> VGet a
 _getStorable _dummy = 
     let n = sizeOf _dummy in
-    consuming n $ VGet $ \ s ->
-        let pTgt = vget_target s in
-        alloca $ \ pA -> do
-            copyBytes (castPtr pA) pTgt n 
-            a <- peek pA
-            let s' = s { vget_target = pTgt `plusPtr` n }
-            return (VGetR a s')
+    consuming n $ VGet $ \ s -> do
+        let pTgt = vget_target s 
+        let s' = s { vget_target = pTgt `plusPtr` n }
+        a <- peekAligned (castPtr pTgt)
+        return (VGetR a s')
 {-# INLINE _getStorable #-}
 
 

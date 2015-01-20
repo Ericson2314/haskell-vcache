@@ -25,7 +25,7 @@ import Data.Word
 import Data.IORef
 import Foreign.Ptr (plusPtr,minusPtr,castPtr)
 import Foreign.Storable (Storable(..))
-import Foreign.Marshal.Alloc (alloca,reallocBytes)
+import Foreign.Marshal.Alloc (reallocBytes)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.ForeignPtr (withForeignPtr)
 
@@ -35,7 +35,8 @@ import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Lazy as LBS
 
 import Database.VCache.Types
-import Database.VCache.Impl
+import Database.VCache.Aligned
+-- import Database.VCache.Impl
 
 -- | Ensure that at least N bytes are available for storage without
 -- growing the underlying buffer. Use this before unsafePutWord8 
@@ -210,13 +211,11 @@ putWord64be w = reserving 8 $ VPut $ \ s -> do
 putStorable :: (Storable a) => a -> VPut () 
 putStorable a = 
     let n = sizeOf a in
-    reserving n $ VPut $ \ s ->
-        let pTgt = vput_target s in
-        let s' = s { vput_target = (pTgt `plusPtr` n) } in
-        alloca $ \ pA -> do
-            poke pA a
-            copyBytes pTgt (castPtr pA) n
-            return (VPutR () s')
+    reserving n $ VPut $ \ s -> do
+        let pTgt = vput_target s 
+        let s' = s { vput_target = (pTgt `plusPtr` n) } 
+        pokeAligned (castPtr pTgt) a
+        return (VPutR () s')
 {-# INLINABLE putStorable #-}
 
 -- | Put an arbitrary integer in a 'varint' format associated with

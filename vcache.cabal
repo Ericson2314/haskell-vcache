@@ -72,6 +72,7 @@ Library
     Database.VCache.Types
     Database.VCache.Impl
     Database.VCache.Open
+    Database.VCache.Aligned
     Database.VCache.RWLock
     -- Database.VCache.Semaphore
     Database.VCache.Hash

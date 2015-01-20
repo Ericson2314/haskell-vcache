@@ -5,12 +5,12 @@ module Database.VCache.Impl
     ) where
 
 import Data.IORef
-import Data.Map.Strict (Map)
-import Data.Word
+-- import Data.Word
 import Data.Typeable
 import Data.Typeable.Internal (TypeRep(..),Fingerprint(..))
-import qualified Data.Map.Strict as M
-import Data.IntMap.Strict (IntMap)
+-- import Data.Map.Strict (Map)
+-- import qualified Data.Map.Strict as M
+-- import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.List as L
 import Control.Concurrent.STM.TVar
@@ -18,10 +18,10 @@ import System.Mem.Weak (Weak)
 import qualified System.Mem.Weak as Weak
 import System.IO.Unsafe
 import Unsafe.Coerce
-import Database.LMDB.Raw
 
+-- import Database.LMDB.Raw
 import Database.VCache.Types
-import Database.VCache.RWLock
+-- import Database.VCache.RWLock
 
 -- | Obtain a VRef given an address 
 addr2vref :: (VCacheable a) => VSpace -> Address -> IO (VRef a)
