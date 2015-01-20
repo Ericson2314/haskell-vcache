@@ -59,7 +59,8 @@ Library
     , containers
     , stm (>= 2.4.3)
     , lmdb
-    , filelock, easy-file
+    , filelock
+    , filepath, easy-file
 
   Exposed-Modules:
     Database.VCache
@@ -70,6 +71,7 @@ Library
   Other-Modules:
     Database.VCache.Types
     Database.VCache.Impl
+    Database.VCache.Open
     Database.VCache.RWLock
     -- Database.VCache.Semaphore
     Database.VCache.Hash

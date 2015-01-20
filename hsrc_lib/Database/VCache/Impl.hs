@@ -10,18 +10,18 @@ import Data.Word
 import Data.Typeable
 import Data.Typeable.Internal (TypeRep(..),Fingerprint(..))
 import qualified Data.Map.Strict as M
-import Database.VCache.Types
-
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.List as L
-
 import Control.Concurrent.STM.TVar
-
 import System.Mem.Weak (Weak)
 import qualified System.Mem.Weak as Weak
 import System.IO.Unsafe
 import Unsafe.Coerce
+import Database.LMDB.Raw
+
+import Database.VCache.Types
+import Database.VCache.RWLock
 
 -- | Obtain a VRef given an address 
 addr2vref :: (VCacheable a) => VSpace -> Address -> IO (VRef a)
@@ -138,5 +138,16 @@ _unsafeDataWeak (PVEph { pveph_weak = w }) = _unsafeCoerceWeakData w
 _unsafeCoerceWeakData :: Weak (TVar (RDV b)) -> Weak (TVar (RDV a))
 _unsafeCoerceWeakData = unsafeCoerce
 {-# INLINE _unsafeCoerceWeakData #-}
+
+
+
+
+
+
+
+
+
+
+
 
 

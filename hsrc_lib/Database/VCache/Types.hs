@@ -34,6 +34,8 @@ import System.FileLock (FileLock)
 import Database.LMDB.Raw
 import Foreign.Ptr
 
+import Database.VCache.RWLock
+
 -- | An address in the VCache address space
 type Address = Word64 -- with '0' as special case
 
@@ -171,7 +173,7 @@ data VSpace = VSpace
     , vcache_db_refcts  :: {-# UNPACK #-} !MDB_dbi' -- address → Word64
     , vcache_db_refct0  :: {-# UNPACK #-} !MDB_dbi' -- address → ()
 
-    --, vcache_db_rwlock  :: {-# UNPACK #-} !RWLock
+    , vcache_db_rwlock  :: !RWLock  -- replace gap left by MDB_NOLOCK
 
     , vcache_mem_vrefs  :: {-# UNPACK #-} !(IORef EphMap) -- track VRefs in memory
     , vcache_mem_pvars  :: {-# UNPACK #-} !(IORef PVEphMap) -- track PVars in memory
