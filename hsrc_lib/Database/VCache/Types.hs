@@ -34,7 +34,6 @@ import System.Mem.Weak (Weak)
 import System.FileLock (FileLock)
 import Database.LMDB.Raw
 import Foreign.Ptr
-import Foreign.Marshal.Alloc
 
 import Database.VCache.RWLock
 
@@ -338,10 +337,10 @@ data WriteVal = WriteVal
 --
 
 -- | Miscellaneous statistics for a VCache instance. These can be 
--- computed at runtime.
+-- computed at runtime, though they aren't guaranteed to be atomic
+-- or consistent. 
 data VCacheStats = VCacheStats
-        { vcstat_txn_count      :: {-# UNPACK #-} !Int  -- ^ number of transactions to reach current state
-        , vcstat_file_size      :: {-# UNPACK #-} !Int  -- ^ estimated file size in bytes
+        { vcstat_file_size      :: {-# UNPACK #-} !Int  -- ^ estimated database file size (in bytes)
         , vcstat_vref_count     :: {-# UNPACK #-} !Int  -- ^ number of immutable values in the database
         , vcstat_pvar_count     :: {-# UNPACK #-} !Int  -- ^ number of mutable PVars in the database
         , vcstat_root_count     :: {-# UNPACK #-} !Int  -- ^ number of named roots (a subset of PVars)

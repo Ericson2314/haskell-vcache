@@ -67,6 +67,7 @@ Library
     Database.VCache.VCacheable
     Database.VCache.VPut
     Database.VCache.VGet
+    Database.VCache.Stats
 
   Other-Modules:
     Database.VCache.Types
