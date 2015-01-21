@@ -14,6 +14,7 @@ module Database.VCache.Types
     , VPut(..), VPutS(..), VPutR(..), PutChild(..)
     , VGet(..), VGetS(..), VGetR(..)
     , VCacheable(..)
+    , Allocator(..), AllocFrame(..), Allocation(..)
     ) where
 
 import Data.Bits
@@ -176,7 +177,7 @@ data VSpace = VSpace
     , vcache_db_rwlock  :: !RWLock -- replace gap left by MDB_NOLOCK
     , vcache_mem_vrefs  :: {-# UNPACK #-} !(IORef EphMap) -- track VRefs in memory
     , vcache_mem_pvars  :: {-# UNPACK #-} !(IORef PVEphMap) -- track PVars in memory
-    , vcache_allocator  :: !(IORef Address) -- allocate new VRefs and PVars
+    , vcache_allocator  :: !(IORef Allocator) -- allocate new VRefs and PVars
 
     -- requested weight limit for cached values
     -- , vcache_weightlim  :: {-# UNPACK #-} !(IORef Int)
@@ -199,52 +200,46 @@ instance Eq VSpace where (==) = (==) `on` vcache_lockfile
 -- | the allocator 
 --
 -- The goal of the allocator is to support developers in adding new
--- VRefs or PVars to the database. The allocator is mostly used 
-
-
--- Question: How do we prevent a VRef from being constructed 
--- twice with two different addresses?
+-- VRefs or PVars to the database. The main challenge, here, is to
+-- ensure that VRefs are never replicated.
 --
--- The issue: If two agents try to construct the same VRef at 
--- around the same time, both will first search the database
--- before checking or updating the recent allocations list. 
--- There may be a race condition where the second agent checks
--- the database while the value is in the allocations list, then
--- checks the allocations list while the value is now in the 
--- database.
+-- To that end, we must track recently written VRefs. If a reader
+-- tries to find the VRef in the database but fails, it must then
+-- test if some other thread has recently allocated it before any
+-- attempt to do so itself. 
 --
--- How to guard against this race condition? 
+-- How recently? Well, based on the frame buffer concurrency, we 
+-- know that while the writer is outputting frame N, readers may
+-- be operating on the database from frames N-1 and N-2. Further,
+-- we'll have new inputs arriving for frame N+1. So, we need to
+-- keep at least three frames of 'recent allocations' for the 
+-- N-2 readers. This assumes we will hold RWLock whenever we try
+-- to construct a VRef.
 --
--- I think we can leverage the RWLock and frame buffering model. A 
--- writer for frame N (next frame) may operate concurrently with 
--- readers on frames N-1 (current frame) and N-2 (previous frame).
--- Meanwhile, after we choose how much to write in one frame, new
--- content must be delayed to frame N+1.
+-- So, three recent frames is all we need. 
 --
--- A reader at frame N will (by definition) see content written by that
--- frame. Thus, a reader at frame N-2 will only need to read buffers
--- for content added in frames N-1, N, N+1. Otherwise, it can depend
--- on the database. This suggests having three buffers for data, with
--- the writer always operating on content from the middle buffer and
--- new content always being added to the N+1 buffer. The writer will
--- form a fresh N+1 buffer and shift stuff backwards as needed.
---  
-
-
-
-
--- action: write a value to the database.
-{-
-data WriteVal = WriteVal
-    { wv_addr :: {-# UNPACK #-} !Address
-    , wv_hash :: {-# UNPACK #-} !HashVal
-    , wv_data :: !ByteString
+-- Note: allocations are processed separately from PVar updates.
+-- A goal here is to take advantage of the fast MDB_APPEND mode.
+--
+data Allocator = Allocator
+    { alloc_addr :: {-# UNPACK #-} !Address -- next address
+    , alloc_frm_next :: !AllocFrame -- frame N+1 (next step)
+    , alloc_frm_curr :: !AllocFrame -- frame N   (curr step)
+    , alloc_frm_prev :: !AllocFrame -- frame N-1 (prev step)
     }
--}
 
+data AllocFrame = AllocFrame 
+    { alloc_list :: [Allocation]        -- all data
+    , alloc_vals :: IntMap [Allocation] -- hashmap (for VRefs only)
+    }
 
-
-
+data Allocation = Alloc 
+    { alloc_hash :: {-# UNPACK #-} !ByteString  -- hash value (or empty)
+    , alloc_size :: {-# UNPACK #-} !Int
+    , alloc_data :: {-# UNPACK #-} !Ptr8
+    , alloc_deps :: [PutChild]
+    , alloc_dest :: {-# UNPACK #-} !Address
+    }
 
 --
 -- Behavior of the timer thread:

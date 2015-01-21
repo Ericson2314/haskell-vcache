@@ -32,7 +32,7 @@ vcacheStats (VCache vc _) = withRdOnlyLock (vcache_db_rwlock vc) $ do
     let rootCount = (fromIntegral $ ms_entries rootStat)
     let memVRefs = IntMap.size memVRefsMap
     let memPVars = IntMap.size memPVarsMap
-    let allocPos = allocSt
+    let allocPos = alloc_addr allocSt
     return $! VCacheStats
         { vcstat_file_size = fileSize
         , vcstat_vref_count = vrefCount

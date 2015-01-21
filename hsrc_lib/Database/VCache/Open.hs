@@ -82,7 +82,7 @@ openVC' nBytes fl fp = do
     mdb_env_open dbEnv fp vcFlags
     flip onException (mdb_env_close dbEnv) $ do
 
-        -- Initial transaction. 
+        -- initial transaction to grab database handles and init allocator
         txnInit <- mdb_txn_begin dbEnv Nothing False
         dbiMemory <- mdb_dbi_open' txnInit (Just "@") [MDB_CREATE, MDB_INTEGERKEY]
         dbiRoots  <- mdb_dbi_open' txnInit (Just "/") [MDB_CREATE]
@@ -93,10 +93,11 @@ openVC' nBytes fl fp = do
         mdb_txn_commit txnInit
 
         let allocStart = nextAllocAddress allocEnd
+        let initAllocator = freshAllocator allocStart
+        allocator <- newIORef initAllocator
         rwLock <- newRWLock
         memVRefs <- newIORef IntMap.empty
         memPVars <- newIORef IntMap.empty
-        allocator <- newIORef allocStart
         let closeVC = mdb_env_close dbEnv >> FileLock.unlockFile fl
         _ <- mkWeakIORef memVRefs closeVC
 
@@ -134,4 +135,9 @@ findLastAddrAllocated txn dbiMemory = alloca $ \ pKey ->
     let bBadSize = fromIntegral (sizeOf vcAllocStart) /= mv_size key in 
     if bBadSize then fail "VCache memory table corrupted" else
     peekAligned (castPtr (mv_data key)) 
+
+freshAllocator :: Address -> Allocator
+freshAllocator addr =
+    let f0 = AllocFrame [] IntMap.empty in
+    Allocator addr f0 f0 f0
 
