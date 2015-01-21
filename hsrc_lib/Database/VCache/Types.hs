@@ -173,17 +173,10 @@ data VSpace = VSpace
     , vcache_db_caddrs  :: {-# UNPACK #-} !MDB_dbi' -- hashval → [address]
     , vcache_db_refcts  :: {-# UNPACK #-} !MDB_dbi' -- address → Word64
     , vcache_db_refct0  :: {-# UNPACK #-} !MDB_dbi' -- address → ()
-
-    , vcache_db_rwlock  :: !RWLock  -- replace gap left by MDB_NOLOCK
-
+    , vcache_db_rwlock  :: !RWLock -- replace gap left by MDB_NOLOCK
     , vcache_mem_vrefs  :: {-# UNPACK #-} !(IORef EphMap) -- track VRefs in memory
     , vcache_mem_pvars  :: {-# UNPACK #-} !(IORef PVEphMap) -- track PVars in memory
-
-    -- For now, just an address. Eventually, I'll want to track all recent
-    -- writes for values at least (for structure sharing), and possibly for
-    -- new PVars. 
-    , vcache_allocator  :: !(IORef Address)
-
+    , vcache_allocator  :: !(IORef Address) -- allocate new VRefs and PVars
 
     -- requested weight limit for cached values
     -- , vcache_weightlim  :: {-# UNPACK #-} !(IORef Int)
@@ -201,6 +194,12 @@ data VSpace = VSpace
     }
 
 instance Eq VSpace where (==) = (==) `on` vcache_lockfile
+
+
+-- | the allocator 
+--
+-- The goal of the allocator is to support developers in adding new
+-- VRefs or PVars to the database. The allocator is mostly used 
 
 
 -- Question: How do we prevent a VRef from being constructed 

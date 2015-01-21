@@ -1,4 +1,3 @@
-
 module Database.VCache.Open
     ( openVCache
     ) where
@@ -72,7 +71,7 @@ vcRootPath = BS.empty
 -- Default address for allocation. We start this high to help 
 -- regulate serialization sizes and simplify debugging.
 vcAllocStart :: Address 
-vcAllocStart = 9999999
+vcAllocStart = 999999999
 
 
 openVC' :: Int -> FileLock -> FilePath -> IO VCache
