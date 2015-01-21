@@ -1,5 +1,7 @@
 
--- primary implementation of VCache (might break up later)
+-- miscellaneous implementation of VCache elements, stuff that doesn't
+-- have a clear home otherwise. I'll try to break this up as much as I
+-- can.
 module Database.VCache.Impl 
     ( addr2vref, addr2pvar
     ) where
@@ -138,9 +140,6 @@ _unsafeDataWeak (PVEph { pveph_weak = w }) = _unsafeCoerceWeakData w
 _unsafeCoerceWeakData :: Weak (TVar (RDV b)) -> Weak (TVar (RDV a))
 _unsafeCoerceWeakData = unsafeCoerce
 {-# INLINE _unsafeCoerceWeakData #-}
-
-
-
 
 
 

@@ -78,6 +78,8 @@ Library
     Database.VCache.RWLock
     -- Database.VCache.Semaphore
     Database.VCache.Hash
+    Database.VCache.VGetInit
+    Database.VCache.VPutFini
    
   ghc-options: -Wall -auto-all
 
