@@ -289,23 +289,23 @@ putc a | c <= 0x7f      = putWord8 (fromIntegral c)
        | c <= 0x7ff     = reserving 2 $ VPut $ \ s -> do
                             let p  = vput_target s
                             let s' = s { vput_target = (p `plusPtr` 2) } 
-                            poke p (0xc0 .|. y)
-                            poke p (0x80 .|. z)
+                            poke (p            ) (0xc0 .|. y)
+                            poke (p `plusPtr` 1) (0x80 .|. z)
                             return (VPutR () s')
        | c <= 0xffff    = reserving 3 $ VPut $ \ s -> do
                             let p  = vput_target s
                             let s' = s { vput_target = (p `plusPtr` 3) }
-                            poke p (0xe0 .|. x)
-                            poke p (0x80 .|. y)
-                            poke p (0x80 .|. z)
+                            poke (p            ) (0xe0 .|. x)
+                            poke (p `plusPtr` 1) (0x80 .|. y)
+                            poke (p `plusPtr` 2) (0x80 .|. z)
                             return (VPutR () s')
        | c <= 0x10ffff  = reserving 4 $ VPut $ \ s -> do
                             let p = vput_target s
                             let s' = s { vput_target = (p `plusPtr` 4) }
-                            poke p (0xf0 .|. w)
-                            poke p (0x80 .|. x)
-                            poke p (0x80 .|. y)
-                            poke p (0x80 .|. z)
+                            poke (p            ) (0xf0 .|. w)
+                            poke (p `plusPtr` 1) (0x80 .|. x)
+                            poke (p `plusPtr` 2) (0x80 .|. y)
+                            poke (p `plusPtr` 3) (0x80 .|. z)
                             return (VPutR () s')
         | otherwise     = fail "not a valid character" -- shouldn't happen
     where 
