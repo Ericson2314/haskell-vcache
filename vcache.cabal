@@ -72,7 +72,6 @@ Library
 
   Other-Modules:
     Database.VCache.Types
-    Database.VCache.Impl
     Database.VCache.Open
     Database.VCache.Aligned
     Database.VCache.RWLock
@@ -80,6 +79,7 @@ Library
     Database.VCache.Hash
     Database.VCache.VGetInit
     Database.VCache.VPutFini
+    Database.VCache.FromAddr
    
   ghc-options: -Wall -auto-all
 

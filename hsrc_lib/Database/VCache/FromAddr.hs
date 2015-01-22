@@ -2,7 +2,7 @@
 -- miscellaneous implementation of VCache elements, stuff that doesn't
 -- have a clear home otherwise. I'll try to break this up as much as I
 -- can.
-module Database.VCache.Impl 
+module Database.VCache.FromAddr 
     ( addr2vref, addr2pvar
     ) where
 

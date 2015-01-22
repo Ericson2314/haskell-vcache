@@ -40,7 +40,7 @@ import qualified Data.ByteString.Lazy as LBS
 
 import Database.VCache.Types
 import Database.VCache.Aligned
-import Database.VCache.Impl
+import Database.VCache.FromAddr
 
 
 -- | isolate a parser to a subset of bytes and value references. The

@@ -7,7 +7,7 @@ module Database.VCache.Types
     , Eph(..), EphMap 
     , PVar(..), RDV
     , PVEph(..), PVEphMap
-    , VTx(..), TxW(..)
+    , VTx(..), TxW(..), VTxBatch(..)
     , VCache(..)
     , VSpace(..)
     , VCacheStats(..)
@@ -28,7 +28,7 @@ import Data.ByteString (ByteString)
 import Control.Monad
 import Control.Monad.STM (STM)
 import Control.Applicative
--- import Control.Concurrent.MVar
+import Control.Concurrent.MVar
 import Control.Concurrent.STM.TVar
 import Control.Monad.Trans.State
 import System.Mem.Weak (Weak)
@@ -108,24 +108,27 @@ data Cache a
 --
 
 -- | A PVar is a mutable variable backed by VCache, and which may be
--- referenced by cached values. PVars support ACID transactions like
--- TVars, and may be used together with TVars.
+-- referenced by cached values. PVars support ACID transactions. The
+-- transactions may be combined with STM updates on ephemeral TVar or
+-- TArray resources. This enables convenient composition of persistent
+-- and ephemeral models. 
 --
--- Unlike VRefs, PVars are not cached. They should be treated as in
--- memory variables, at least after the first read. Their first read
--- is lazy, such that a PVar is not parsed or loaded if not used. A
--- PVar must contain VRefs to support caching or structure sharing.
---
--- In addition to anonymous PVars, VCache supports named global roots
--- for persistence. Further, a simplistic filesystem-like structure 
--- enables subprograms to each have a fresh namespace. Named PVars are
--- the foundation for persistence. 
+-- The first read of a PVar is lazy, i.e. contents won't be read from
+-- the LMDB file until necessary. After loaded, PVar contents remain
+-- in memory unless the PVar itself is GC'd from Haskell memory. Use 
+-- PVars together with VRefs where you desire memory-cached content
+-- for data models larger than system memory.
 -- 
--- Developers must be careful with respect to cyclic references among
--- PVars. The VCache garbage collector uses reference counting because
--- it scales nicely to very large content, but cyclic references will
--- stymie this simplistic algorithm. Cycles must be avoided or broken
--- to avoid leaking disk space.
+-- VCache provides a set of named root PVars as a basis for persistent
+-- applications. Anonymous PVars may be created at any time to support
+-- arbitrary data models.
+--
+-- Programmers must be careful with regards to cyclic references among
+-- PVars. The VCache garbage collector uses reference counting, which
+-- scales nicely but can leak cyclic data structures. Cycles are not
+-- forbidden. But programmers that use cycles must be careful to break
+-- cycles when done with them. Also, cycles must always be reachable  
+-- from named root PVars, otherwise they certainly leak upon crash.
 --
 data PVar a = PVar
     { pvar_addr  :: {-# UNPACK #-} !Address
@@ -142,6 +145,9 @@ data PVEph = forall a . PVEph
     , pveph_weak :: {-# UNPACK #-} !(Weak (TVar (RDV a)))
     } 
 type PVEphMap = IntMap [PVEph]
+
+-- thoughts: It might be useful to eventually support 'Weak' PVars.
+--   However, I'll leave this off for now.
 
 -- Left iff not read.
 type RDV a = Either (VGet a) a
@@ -177,7 +183,9 @@ data VSpace = VSpace
     , vcache_db_rwlock  :: !RWLock -- replace gap left by MDB_NOLOCK
     , vcache_mem_vrefs  :: {-# UNPACK #-} !(IORef EphMap) -- track VRefs in memory
     , vcache_mem_pvars  :: {-# UNPACK #-} !(IORef PVEphMap) -- track PVars in memory
-    , vcache_allocator  :: !(IORef Allocator) -- allocate new VRefs and PVars
+    , vcache_allocator  :: {-# UNPACK #-} !(IORef Allocator) -- allocate new VRefs and PVars
+    , vcache_signal     :: {-# UNPACK #-} !(MVar ()) -- signal writer that work is available
+    , vcache_writes     :: {-# UNPACK #-} !(TVar [VTxBatch]) -- incoming transactional writes
 
     -- requested weight limit for cached values
     -- , vcache_weightlim  :: {-# UNPACK #-} !(IORef Int)
@@ -187,7 +195,6 @@ data VSpace = VSpace
     -- Further, I need...
     --   log or queue of 'new' vrefs and pvars, 
     --     including those still being written
-    --   semaphore to block writer on older readers
     --   a thread performing writes and incremental GC
     --   a channel to talk to that thread
     --   queue of MVars waiting on synchronization/flush.
@@ -195,6 +202,8 @@ data VSpace = VSpace
     }
 
 instance Eq VSpace where (==) = (==) `on` vcache_lockfile
+
+-- needed: a transactional queue of updates to PVars
 
 -- | the allocator 
 --
@@ -239,11 +248,35 @@ data Allocation = Alloc
     { alloc_hash :: {-# UNPACK #-} !ByteString  -- hash value (or empty)
     , alloc_size :: {-# UNPACK #-} !Int
     , alloc_data :: {-# UNPACK #-} !Ptr8
-    , alloc_deps :: [PutChild]
     , alloc_dest :: {-# UNPACK #-} !Address
+    , alloc_deps :: [PutChild]
     }
 
 --
+-- Two or Three writer threads?
+-- 
+-- For incoming writes, I want at least one writer thread performing
+-- 'serialization' of content into clearly defined 'batches'. These
+-- batches will then be written to LMDB. 
+--
+-- Serialization via background thread could help ensure all necessary
+-- values are allocated before the batch finishes, and might also be an
+-- effective basis for additional parallelism: multiple threads, or a 
+-- small thread pool, working to evaluate and serialize large values. 
+--
+-- By limiting the serialization thread to work at most one batch 
+-- ahead of the LMDB writer thread, we could probably achieve a fair
+-- degree of bounded buffer pipeline parallelism, i.e. we're serializing
+-- one batch concurrently with writing another to LMDB concurrently with
+-- performing transactions on PVars in the background.
+--
+-- Finally, we might have the writer spin off a thread to perform an
+-- mdb_sync after every write, in parallel with starting the next write.
+-- This might result in a little extra work, but it won't delay further
+-- updates and so on.
+-- 
+
+-- 
 -- Behavior of the timer thread:
 --   wait for a short period of time
 --   writeIORef rfTick True
@@ -352,14 +385,16 @@ data VCacheStats = VCacheStats
 -- resources, providing a simple basis for consistency between the
 -- persistent and ephemeral resources.
 --
--- Durability is optional: when a VTx transaction completes, a batch
--- of updates will be commited to disk by a background thread. Many
--- transactions from around the same time will be aggregated by the
--- writer, to amortize synchronization costs. A durable transaction
--- will wait until the writer signals that everything is backed by
--- the filesystem. A non-durable transaction will not wait, but may
--- read and write values without guarantee that they are backed to
--- disk.
+-- Durability is optional: after a VTx transaction completes, PVar
+-- updates are batched and committed to LMDB by a background thread.
+-- Multiple transactions may be committed together, amortizing any
+-- synchronization costs. Durable transactions will wait on a signal
+-- that all content has been pushed to disk. 
+-- 
+-- Note: The queue that records batches of PVars for serialization is
+-- unfortunately a bottleneck for parallelism. Effective parallelism
+-- may require shifting expensive computations outside of transactions,
+-- and keeping transactions minimal or leveraging laziness.
 -- 
 newtype VTx a = VTx { _vtx :: StateT WriteLog STM a }
     deriving (Monad, Functor, Applicative, Alternative, MonadPlus)
@@ -369,11 +404,13 @@ newtype VTx a = VTx { _vtx :: StateT WriteLog STM a }
     -- commits. Serialization is lazy to better support batching. 
 
 type WriteLog  = [TxW]
-data TxW = forall a . TxW !(PVar a) a
+data TxW = forall a . TxW !(PVar a) {- a -}
     -- note: PVars should not be GC'd before written to disk. An
     -- alternative is that `loadPVar` waits on active writes, or
     -- accesses the global write log. But it's easiest to simply
     -- not GC until finished writing.
+data VTxBatch = VTxBatch SyncOp WriteLog 
+type SyncOp = IO () -- called after write is synchronized.
 
 type Ptr8 = Ptr Word8
 type PtrIni = Ptr8

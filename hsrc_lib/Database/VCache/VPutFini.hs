@@ -16,6 +16,14 @@ import Database.VCache.VPut
 -- normal byte output, with a final size value (not including itself)
 -- to indicate how far to jump back.
 --
+-- Actually, we output the first address followed by relative offsets
+-- for every following address. This behavior allows us to reduce the
+-- serialization costs when addresses are near each other in memory.
+--
+-- The address list is output in the reverse order of serialization.
+-- (This simplifies reading in the same order as serialization without
+-- a list reversal operation.)
+--
 -- It's important that we finalize exactly once for every serialization,
 -- and that this be applied before any hash functions.
 vputFini :: VPut ()
@@ -32,6 +40,7 @@ getBufferSize = VPut $ \ s ->
     let size = (vput_target s) `minusPtr` pStart in
     size `seq`
     return (VPutR size s)
+{-# INLINE getBufferSize #-}
 
 listChildren :: VPut [PutChild]
 listChildren = VPut $ \ s ->
@@ -74,5 +83,3 @@ putVarNatR' n =
     let (q,r) = n `divMod` 128 in
     putWord8 (0x80 .|. fromIntegral r) >>
     putVarNatR' q
-    
-

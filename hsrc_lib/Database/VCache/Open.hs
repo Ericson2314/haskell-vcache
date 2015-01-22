@@ -17,6 +17,8 @@ import Data.Bits
 import Data.IORef
 import qualified Data.IntMap as IntMap
 import qualified Data.ByteString as BS
+import Control.Concurrent.MVar
+import Control.Concurrent.STM.TVar
 
 import Database.LMDB.Raw
 import Database.VCache.Types 
@@ -44,6 +46,9 @@ import Database.VCache.Aligned
 -- in megabytes. Some systems may be limited, e.g. due to virtual address
 -- space of the CPU (frequently 48 bits even on a 64 bit system) or user
 -- quotas. It is not a problem to change this value between runs.
+--
+-- In general, due to the background threads (GC, writer, etc.), a VCache
+-- will remain in memory after opened and until the Haskell process halts.
 --
 openVCache :: Int -> FilePath -> IO VCache
 openVCache nMB fp = do
@@ -92,14 +97,23 @@ openVC' nBytes fl fp = do
         allocEnd <- findLastAddrAllocated txnInit dbiMemory
         mdb_txn_commit txnInit
 
+        -- ephemeral resources
         let allocStart = nextAllocAddress allocEnd
         let initAllocator = freshAllocator allocStart
         allocator <- newIORef initAllocator
         rwLock <- newRWLock
         memVRefs <- newIORef IntMap.empty
         memPVars <- newIORef IntMap.empty
+        tvWrites <- newTVarIO []
+        mvSignal <- newMVar ()
+
+        -- todo: create background threads; begin VCache GC 
+
+        -- Realistically, we're unlikely to ever GC our VCache due
+        -- to background threads. But, if it does happen, we should
+        -- close the MDB environment and release the lockfile.
         let closeVC = mdb_env_close dbEnv >> FileLock.unlockFile fl
-        _ <- mkWeakIORef memVRefs closeVC
+        _ <- mkWeakMVar mvSignal closeVC
 
         return $! VCache 
             { vcache_path = vcRootPath
@@ -115,6 +129,8 @@ openVC' nBytes fl fp = do
                 , vcache_mem_vrefs = memVRefs
                 , vcache_mem_pvars = memPVars
                 , vcache_allocator = allocator
+                , vcache_signal = mvSignal
+                , vcache_writes = tvWrites
                 }
             }
 
