@@ -69,6 +69,7 @@ Library
     Database.VCache.VGet
     Database.VCache.Stats
     Database.VCache.Path
+    Database.VCache.Sync
 
   Other-Modules:
     Database.VCache.Types

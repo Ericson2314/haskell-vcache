@@ -8,6 +8,7 @@ module Database.VCache
     , module Database.VCache.VCacheable
     , module Database.VCache.Stats
     , module Database.VCache.Path
+    , module Database.VCache.Sync
 
     -- * Utility
     ) where
@@ -17,4 +18,4 @@ import Database.VCache.VCacheable
 import Database.VCache.Open
 import Database.VCache.Stats
 import Database.VCache.Path
-
+import Database.VCache.Sync
