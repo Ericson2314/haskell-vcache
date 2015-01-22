@@ -196,7 +196,6 @@ data VSpace = VSpace
 
 instance Eq VSpace where (==) = (==) `on` vcache_lockfile
 
-
 -- | the allocator 
 --
 -- The goal of the allocator is to support developers in adding new
@@ -213,10 +212,13 @@ instance Eq VSpace where (==) = (==) `on` vcache_lockfile
 -- be operating on the database from frames N-1 and N-2. Further,
 -- we'll have new inputs arriving for frame N+1. So, we need to
 -- keep at least three frames of 'recent allocations' for the 
--- N-2 readers. This assumes we will hold RWLock whenever we try
--- to construct a VRef.
+-- N-2 readers. This assumes we will hold RdOnlyLock whenever we
+-- try to construct a VRef.
 --
--- So, three recent frames is all we need. 
+-- Allocated values must become persistent before any update on
+-- PVars that will include references to these values. Fortunately,
+-- this should not be difficult to achieve, and can mostly run in
+-- the background thread.
 --
 -- Note: allocations are processed separately from PVar updates.
 -- A goal here is to take advantage of the fast MDB_APPEND mode.
