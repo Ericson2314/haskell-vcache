@@ -70,8 +70,15 @@ vcFlags = [MDB_NOSUBDIR     -- open file name, not directory name
           ,MDB_NOLOCK       -- leave lock management to VCache
           ]
 
+-- I'm providing a non-empty root bytestring because it allows
+-- me some arbitrary namespaces for VCache, if I ever choose to
+-- use them. Also, I will use the empty bytestring to indicate
+-- anonymous PVars when it comes up (e.g. in Allocation).
+--
+-- The maximum path, including the PVar name, is 511 bytes. That
+-- should be enough for almost any use case.
 vcRootPath :: BS.ByteString
-vcRootPath = BS.empty
+vcRootPath = BS.singleton 47
 
 -- Default address for allocation. We start this high to help 
 -- regulate serialization sizes and simplify debugging.
@@ -101,13 +108,13 @@ openVC' nBytes fl fp = do
         let allocStart = nextAllocAddress allocEnd
         let initAllocator = freshAllocator allocStart
         allocator <- newIORef initAllocator
-        rwLock <- newRWLock
         memVRefs <- newIORef IntMap.empty
         memPVars <- newIORef IntMap.empty
         tvWrites <- newTVarIO []
         mvSignal <- newMVar ()
+        rwLock <- newRWLock
 
-        -- todo: create background threads; begin VCache GC 
+        -- todo: create all the background threads 
 
         -- Realistically, we're unlikely to ever GC our VCache due
         -- to background threads. But, if it does happen, we should
@@ -125,12 +132,12 @@ openVC' nBytes fl fp = do
                 , vcache_db_caddrs = dbiHashes
                 , vcache_db_refcts = dbiRefct
                 , vcache_db_refct0 = dbiRefct0
-                , vcache_db_rwlock = rwLock
                 , vcache_mem_vrefs = memVRefs
                 , vcache_mem_pvars = memPVars
                 , vcache_allocator = allocator
                 , vcache_signal = mvSignal
                 , vcache_writes = tvWrites
+                , vcache_rwlock = rwLock
                 }
             }
 
@@ -155,5 +162,5 @@ findLastAddrAllocated txn dbiMemory = alloca $ \ pKey ->
 freshAllocator :: Address -> Allocator
 freshAllocator addr =
     let f0 = AllocFrame [] IntMap.empty in
-    Allocator addr f0 f0 f0
+    Allocator addr (addr-1) f0 f0 f0
 

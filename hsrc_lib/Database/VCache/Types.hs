@@ -7,7 +7,7 @@ module Database.VCache.Types
     , Eph(..), EphMap 
     , PVar(..), RDV
     , PVEph(..), PVEphMap
-    , VTx(..), TxW(..), VTxBatch(..)
+    , VTx(..), TxW(..), VTxBatch(..), liftSTM
     , VCache(..)
     , VSpace(..)
     , VCacheStats(..)
@@ -15,6 +15,10 @@ module Database.VCache.Types
     , VGet(..), VGetS(..), VGetR(..)
     , VCacheable(..)
     , Allocator(..), AllocFrame(..), Allocation(..)
+
+    -- a few utilities
+    , allocFrameSearch
+    , withRdOnlyTxn, withByteStringVal
     ) where
 
 import Data.Bits
@@ -25,16 +29,20 @@ import Data.IORef
 import Data.IntMap.Strict (IntMap)
 -- import Data.Map.Strict (Map)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString.Internal as BSI
 import Control.Monad
+import Control.Monad.Trans.Class (lift)
 import Control.Monad.STM (STM)
 import Control.Applicative
 import Control.Concurrent.MVar
 import Control.Concurrent.STM.TVar
 import Control.Monad.Trans.State
+import Control.Exception (bracket)
 import System.Mem.Weak (Weak)
 import System.FileLock (FileLock)
 import Database.LMDB.Raw
 import Foreign.Ptr
+import Foreign.ForeignPtr (withForeignPtr)
 
 import Database.VCache.RWLock
 
@@ -180,12 +188,12 @@ data VSpace = VSpace
     , vcache_db_caddrs  :: {-# UNPACK #-} !MDB_dbi' -- hashval → [address]
     , vcache_db_refcts  :: {-# UNPACK #-} !MDB_dbi' -- address → Word64
     , vcache_db_refct0  :: {-# UNPACK #-} !MDB_dbi' -- address → ()
-    , vcache_db_rwlock  :: !RWLock -- replace gap left by MDB_NOLOCK
     , vcache_mem_vrefs  :: {-# UNPACK #-} !(IORef EphMap) -- track VRefs in memory
     , vcache_mem_pvars  :: {-# UNPACK #-} !(IORef PVEphMap) -- track PVars in memory
     , vcache_allocator  :: {-# UNPACK #-} !(IORef Allocator) -- allocate new VRefs and PVars
     , vcache_signal     :: {-# UNPACK #-} !(MVar ()) -- signal writer that work is available
     , vcache_writes     :: {-# UNPACK #-} !(TVar [VTxBatch]) -- incoming transactional writes
+    , vcache_rwlock     :: !RWLock -- replace gap left by MDB_NOLOCK
 
     -- requested weight limit for cached values
     -- , vcache_weightlim  :: {-# UNPACK #-} !(IORef Int)
@@ -222,18 +230,30 @@ instance Eq VSpace where (==) = (==) `on` vcache_lockfile
 -- we'll have new inputs arriving for frame N+1. So, we need to
 -- keep at least three frames of 'recent allocations' for the 
 -- N-2 readers. This assumes we will hold RdOnlyLock whenever we
--- try to construct a VRef.
+-- try to construct a VRef. (Note: I would need to hold onto the
+-- content for an additional step if I'm going to 'free' content
+-- explicitly. But, for now, I'll leave it to GC via ByteString.)
+--
+-- The allocator will double as a log of recently allocated data.
+-- Mostly, this is important when allocating new PVars, or when
+-- loading a recently allocated VRef.
+--
+-- In addition to VRefs, I need to track allocated root PVars to
+-- prevent a given root from being assigned two addresses. The 
+-- new anonymous PVar may be updated more conventionally, but 
+-- will be written at least once after allocation
 --
 -- Allocated values must become persistent before any update on
 -- PVars that will include references to these values. Fortunately,
 -- this should not be difficult to achieve, and can mostly run in
--- the background thread.
+-- a background thread.
 --
 -- Note: allocations are processed separately from PVar updates.
 -- A goal here is to take advantage of the fast MDB_APPEND mode.
 --
 data Allocator = Allocator
-    { alloc_addr :: {-# UNPACK #-} !Address -- next address
+    { alloc_new_addr :: {-# UNPACK #-} !Address -- next address
+    , alloc_old_addr :: {-# UNPACK #-} !Address -- address from older frames
     , alloc_frm_next :: !AllocFrame -- frame N+1 (next step)
     , alloc_frm_curr :: !AllocFrame -- frame N   (curr step)
     , alloc_frm_prev :: !AllocFrame -- frame N-1 (prev step)
@@ -241,16 +261,41 @@ data Allocator = Allocator
 
 data AllocFrame = AllocFrame 
     { alloc_list :: [Allocation]        -- all data
-    , alloc_vals :: IntMap [Allocation] -- hashmap (for VRefs only)
+    , alloc_seek :: IntMap [Allocation] -- hashmap
     }
 
-data Allocation = Alloc 
-    { alloc_hash :: {-# UNPACK #-} !ByteString  -- hash value (or empty)
-    , alloc_size :: {-# UNPACK #-} !Int
-    , alloc_data :: {-# UNPACK #-} !Ptr8
-    , alloc_dest :: {-# UNPACK #-} !Address
-    , alloc_deps :: [PutChild]
+data Allocation = Allocation
+    { alloc_name :: {-# UNPACK #-} !ByteString -- VRef hash or PVar path, or empty for anon PVar
+    , alloc_data :: {-# UNPACK #-} !ByteString -- initial content
+    , alloc_addr :: {-# UNPACK #-} !Address    -- where to save content
+    , alloc_deps :: [PutChild]                 -- keepalive for allocation
     }
+
+allocFrameSearch :: (AllocFrame -> Maybe a) -> Allocator -> Maybe a
+allocFrameSearch f a = f n <|> f c <|> f p where
+    n = alloc_frm_next a
+    c = alloc_frm_curr a
+    p = alloc_frm_prev a
+
+-- thoughts: I may need an additional allocations list for anonymous
+-- PVars, if only to support a `newPVarIO` or similar.
+
+
+-- simple read-only operations 
+--  LMDB transaction is aborted when finished, so cannot open DBIs
+withRdOnlyTxn :: VSpace -> (MDB_txn -> IO a) -> IO a
+withRdOnlyTxn vc = withLock . bracket newTX endTX where
+    withLock = withRdOnlyLock (vcache_rwlock vc)
+    newTX = mdb_txn_begin (vcache_db_env vc) Nothing True
+    endTX = mdb_txn_abort
+
+withByteStringVal :: ByteString -> (MDB_val -> IO a) -> IO a
+withByteStringVal (BSI.PS fp off len) action = withForeignPtr fp $ \ p ->
+    action $ MDB_val { mv_size = fromIntegral len
+                     , mv_data = p `plusPtr` off }
+    
+
+
 
 --
 -- Two or Three writer threads?
@@ -396,12 +441,19 @@ data VCacheStats = VCacheStats
 -- may require shifting expensive computations outside of transactions,
 -- and keeping transactions minimal or leveraging laziness.
 -- 
-newtype VTx a = VTx { _vtx :: StateT WriteLog STM a }
+newtype VTx a = VTx { _vtx :: StateT [(VSpace,WriteLog)] STM a }
     deriving (Monad, Functor, Applicative, Alternative, MonadPlus)
     -- basically, just an STM transaction that additionally tracks
-    -- writes to PVars, potentially across many VCache resources.
+    -- involved VSpaces (in case of durable read-only transaction)
+    -- and a writelog within each space (for the main batch). 
+    -- 
     -- List is delivered to the writer threads only if the transaction
     -- commits. Serialization is lazy to better support batching. 
+
+-- | run an arbitrary STM operation as part of a VTx transaction.
+liftSTM :: STM a -> VTx a
+liftSTM = VTx . lift
+
 
 type WriteLog  = [TxW]
 data TxW = forall a . TxW !(PVar a) {- a -}

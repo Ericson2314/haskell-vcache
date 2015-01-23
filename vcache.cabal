@@ -58,7 +58,7 @@ Library
     , transformers
     , containers
     , stm (>= 2.4.3)
-    , lmdb
+    , lmdb (>= 0.2.5)
     , filelock
     , filepath, easy-file
 
@@ -76,11 +76,11 @@ Library
     Database.VCache.Open
     Database.VCache.Aligned
     Database.VCache.RWLock
-    -- Database.VCache.Semaphore
     Database.VCache.Hash
     Database.VCache.VGetInit
     Database.VCache.VPutFini
     Database.VCache.FromAddr
+    Database.VCache.Alloc
    
   ghc-options: -Wall -auto-all
 

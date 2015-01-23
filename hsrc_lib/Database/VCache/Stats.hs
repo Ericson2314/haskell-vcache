@@ -14,7 +14,7 @@ import qualified Data.IntMap as IntMap
 -- runtime. These aren't really useful for anything, except to gain
 -- some confidence about activity or comprehension of performance. 
 vcacheStats :: VCache -> IO VCacheStats
-vcacheStats (VCache vc _) = withRdOnlyLock (vcache_db_rwlock vc) $ do
+vcacheStats (VCache vc _) = withRdOnlyLock (vcache_rwlock vc) $ do
     let db = vcache_db_env vc
     envInfo <- mdb_env_info db
     envStat <- mdb_env_stat db
@@ -32,8 +32,8 @@ vcacheStats (VCache vc _) = withRdOnlyLock (vcache_db_rwlock vc) $ do
     let rootCount = (fromIntegral $ ms_entries rootStat)
     let memVRefs = IntMap.size memVRefsMap
     let memPVars = IntMap.size memPVarsMap
-    let allocPos = alloc_addr allocSt
-    return $! VCacheStats
+    let allocPos = alloc_new_addr allocSt
+    return $ VCacheStats
         { vcstat_file_size = fileSize
         , vcstat_vref_count = vrefCount
         , vcstat_pvar_count = pvarCount
