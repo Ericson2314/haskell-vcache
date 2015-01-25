@@ -39,16 +39,17 @@ import Database.VCache.Aligned
 --
 -- Developers must choose the database file name. I'd leave 'cache' out of
 -- the name unless you want users to feel free to delete it. An additional
--- lockfile is created with the same file name plus the "-lock" suffix. An
--- exception will be thrown if the file cannot be created or opened.
+-- lockfile is created with the same file name plus a "-lock" suffix. An
+-- exception is raised if the files cannot be created, locked, or opened.
 --
--- In addition to the file, developers must choose a maximum database size
--- in megabytes. Some systems may be limited, e.g. due to virtual address
--- space of the CPU (frequently 48 bits even on a 64 bit system) or user
--- quotas. It is not a problem to change this value between runs.
+-- In addition to the file location, developers must choose a maximum 
+-- database size in megabytes. This determines how much address space 
+-- is requested, and the maximum file size. On one 64-bit Ubuntu system,
+-- the limit was to open for 127TB (despite 120GB disk and 8GB RAM). 
+-- But you may want to reserve some address space for other purposes.
 --
--- In general, due to the background threads (GC, writer, etc.), a VCache
--- will remain in memory after opened and until the Haskell process halts.
+-- VCache will generally remain in memory after it opens. A few background
+-- threads may keep it alive for a very long time.
 --
 openVCache :: Int -> FilePath -> IO VCache
 openVCache nMB fp = do

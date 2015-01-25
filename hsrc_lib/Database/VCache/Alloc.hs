@@ -1,9 +1,11 @@
 
 -- allocators for PVars and VRefs
 module Database.VCache.Alloc
-    ( loadRootPVar, loadRootPVarIO
-    , newPVarIO, newPVar
-    , newPVarIO', newPVar'
+    ( loadRootPVar
+    , loadRootPVarIO
+    , newPVar
+    , newPVarIO
+    , newVRefIO
     ) where
 
 -- import Control.Exception
@@ -21,7 +23,7 @@ import Foreign.Ptr
 import Foreign.Storable
 -- import Control.Concurrent.STM
 import GHC.Conc (unsafeIOToSTM)
-import System.IO.Unsafe (unsafePerformIO, unsafeInterleaveIO)
+import System.IO.Unsafe (unsafePerformIO)
 
 import Database.LMDB.Raw
 
@@ -32,10 +34,11 @@ import Database.VCache.Path
 import Database.VCache.Aligned
 import Database.VCache.VPutFini
 -- import Database.VCache.VCacheable
+import Database.VCache.Hash
 
 -- | load a root PVar immediately, in the IO monad. This can be more
 -- convenient than loadRootPVar if you need to control where errors
--- are detected or initialization is performed. See loadRootPVar.
+-- are detected or when initialization is performed. See loadRootPVar.
 loadRootPVarIO :: (VCacheable a) => VCache -> ByteString -> a -> IO (PVar a)
 loadRootPVarIO vc name def =
     case vcacheSubdirM name vc of
@@ -63,7 +66,8 @@ _loadRootPVarIO vc name defaultVal = withRdOnlyTxn vc $ \ txn ->
             addr2pvar vc addr
 
 -- This variation of PVar allocation will support lookup by the given
--- PVar name.
+-- PVar name, i.e. in case the same root is allocated multiple times in
+-- a short period.
 allocNamedPVar :: ByteString -> ByteString -> [PutChild] -> Allocator -> (Allocator, Address)
 allocNamedPVar name _data _deps ac =
     let hkey = allocNameHash 1 name in
@@ -94,45 +98,40 @@ allocNamedPVar name _data _deps ac =
 -- If this is the first time the PVar is loaded, it will be initialized 
 -- by the given value. 
 --
--- Semantically, this is a pure operation. If you load with the same 
--- arguments and data many times, you'll receive the same PVar each 
--- time. However, loadRootPVarIO may be preferable to control when and
--- where errors are detected.
+-- The illusion provided is that the PVar has always been there, accessible
+-- by name. Thus, this is provided as a pure operation. However, errors are
+-- possible - e.g. you cannot load a PVar with two different types, and the
+-- limit for the PVar name is about 500 bytes. loadRootPVarIO can provide
+-- better control over when and where errors are detected. 
 --
--- Note: there is no way to delete a root PVar. An application should
--- use only a fixed count of root PVars, usually just one or a few,
--- and push most domain modeling into the data types.
+-- The normal use case for root PVars is to have just a few near the toplevel
+-- of the application, or in each major modular component (e.g. a few for the
+-- framework, a few for the WAI app, a few for the plugin). Use vcacheSubdir 
+-- to divide the namespace among modular components. Domain modeling should 
+-- be pushed to the data types.
+--
 loadRootPVar :: (VCacheable a) => VCache -> ByteString -> a -> PVar a
 loadRootPVar vc name ini = unsafePerformIO (loadRootPVarIO vc name ini)
 {-# INLINE loadRootPVar #-}
 
 -- | Create a new, unique, anonymous PVar via the IO monad. This is
 -- more or less equivalent to newTVarIO, except that the PVar may be
--- referenced from persistent values in the associated VCache. Note
--- that a PVar may be garbage collected if not used.
---
--- Unlike newTVarIO, there is no use case for newPVarIO to construct 
--- 'global' variables. Use loadRootPVar instead, to model globals 
--- that persist from one run of the application to another.
+-- referenced from persistent values in the associated VCache. Like
+-- newTVarIO, this can be used from unsafePerformIO. Unlike newTVarIO, 
+-- there is no use case for newPVarIO to construct global variables. 
 --
 -- In most cases, you should favor the transactional newPVar.
 --
-newPVarIO :: (VCacheable a) => VCache -> a -> IO (PVar a)
-newPVarIO = newPVarIO' . vcache_space
-{-# INLINE newPVarIO #-}
-
--- | newPVarIO on VSpace instead of VCache
-newPVarIO' :: (VCacheable a) => VSpace -> a -> IO (PVar a)
-newPVarIO' vc ini = unsafeInterleaveIO $
+newPVarIO :: (VCacheable a) => VSpace -> a -> IO (PVar a)
+newPVarIO vc ini = 
     runVPutIO vc (put ini) >>= \ ((), _data, _deps) ->
-    atomicModifyIORef (vcache_allocator vc) (allocAnonPVar _data _deps) >>= \ addr ->
+    atomicModifyIORef (vcache_allocator vc) (allocAnonPVarIO _data _deps) >>= \ addr ->
     addr2pvar_new vc addr ini
-{-# INLINE newPVarIO' #-}
 
 -- allocate PVar such that its initial value will be stored by the background
 -- thread. This variation assumes an anonymous PVar.
-allocAnonPVar :: ByteString -> [PutChild] -> Allocator -> (Allocator, Address)
-allocAnonPVar _data _deps ac =
+allocAnonPVarIO :: ByteString -> [PutChild] -> Allocator -> (Allocator, Address)
+allocAnonPVarIO _data _deps ac =
     let newAddr = alloc_new_addr ac in
     let an = Allocation { alloc_name = BS.empty
                         , alloc_data = _data
@@ -151,31 +150,21 @@ allocAnonPVar _data _deps ac =
  
 -- | Create a new, anonymous PVar as part of an active transaction.
 --
--- This transactional variation has some advantages. The initial value
--- is treated as a normal write, with respect to the backing file. So
--- nothing at all is written if the transaction fails, and writes may
--- be batched if the writer is busy.
---
--- newPVar does consume an address even if the transaction fails. 
-newPVar :: (VCacheable a) => VCache -> a -> VTx (PVar a)
-newPVar = newPVar' . vcache_space
-{-# INLINE newPVar #-}
-
-newPVar' :: (VCacheable a) => VSpace -> a -> VTx (PVar a)
-newPVar' vc ini = do
+-- Compared to newPVarIO, this transactional variation has performance
+-- advantages. The constructor only needs to grab an address. Nothing is
+-- written to disk unless the transaction succeeds. 
+newPVar :: (VCacheable a) => a -> VTx (PVar a)
+newPVar ini = do
+    vc <- getVTxSpace 
     pvar <- liftSTM $ unsafeIOToSTM $ newPVarVTxIO vc ini
     markForWrite pvar
     return pvar
 
--- mark a PVar as having been written, such that after the
--- transaction succeeds we'll push it to the backing file.
-markForWrite :: PVar a -> VTx ()
-markForWrite = error "todo: markForWrite"
-
 newPVarVTxIO :: (VCacheable a) => VSpace -> a -> IO (PVar a)
-newPVarVTxIO vc ini = unsafeInterleaveIO $
+newPVarVTxIO vc ini = 
     atomicModifyIORef (vcache_allocator vc) allocPVarVTx >>= \ addr ->
     addr2pvar_new vc addr ini
+{-# INLINE newPVarVTxIO #-}
 
 -- Allocate just the new PVar address. Do not store any information
 -- about this PVar in the allocator. Writing the PVar will be delayed
@@ -186,10 +175,26 @@ allocPVarVTx ac =
     let pvAddr = 1 + newAddr in
     let ac' = ac { alloc_new_addr = 2 + newAddr } in
     (ac', pvAddr)
-    
-
-newVRefIO :: (VCacheable a) => VCache -> a -> IO (VRef a)
-newVRefIO = error "todo"
+   
+-- | Construct a VRef in the IO monad. Note that constructing a VRef
+-- is relatively expensive: it always requires serializing the value
+-- and hashing the result (due to structure sharing). VRefs are read
+-- optimized, with the assumption that you'll read them, on average,
+-- more frequently than you construct them.
+--
+-- VRefs of multiple different types can potentially share the same
+-- address, assuming the same serialized form.
+newVRefIO :: (VCacheable a) => VSpace -> a -> IO (VRef a)
+newVRefIO vc v = 
+    runVPutIO vc (put v) >>= \ ((), _data, _deps) ->
+    let hashBytes = hash _data in
+    let nameHash = allocNameHash 1 hashBytes in
+    hashBytes `seq` -- compute before locking
+    error "TODO: newVRefIO'"
+    -- need to obtain a read lock, read the database for any matches on
+    -- the hash function and see if one of those addresses is good, and
+    -- then check the allocator in case the same VRef has been recently
+    -- allocated.
 
 -- Compute a simple hash function for use within the allocation frames.
 -- This doesn't need to be very good, just fast and good enough to 

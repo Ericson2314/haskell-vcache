@@ -35,7 +35,7 @@ data RWLock = RWLock
 data FB = FB !F !F  -- frame buffer
 type F = IORef Frame
 data Frame = Frame 
-    { frame_reader_next :: !Int
+    { frame_reader_next :: {-# UNPACK #-} !Int
     , frame_readers     :: !IntSet
     , frame_onClear     :: ![IO ()] -- actions to perform 
     }
@@ -104,7 +104,8 @@ rotateReaderFrames l = mask_ $ do
 onFrameCleared :: F -> IO () -> IO ()
 onFrameCleared f action = atomicModifyIORef f addAction >>= id where
     addAction frame =
-        if IntSet.null (frame_readers frame) then (frame,action) else
+        let bAlreadyClear = IntSet.null (frame_readers frame) in
+        if bAlreadyClear then (frame0,action) else
         let onClear' = action : frame_onClear frame in
         let frame' = frame { frame_onClear = onClear' } in
         (frame', return ())

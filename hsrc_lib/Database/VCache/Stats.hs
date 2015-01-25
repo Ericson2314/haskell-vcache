@@ -6,7 +6,6 @@ module Database.VCache.Stats
 
 import Database.LMDB.Raw
 import Database.VCache.Types
-import Database.VCache.RWLock
 import Data.IORef
 import qualified Data.IntMap as IntMap
 
@@ -14,15 +13,13 @@ import qualified Data.IntMap as IntMap
 -- runtime. These aren't really useful for anything, except to gain
 -- some confidence about activity or comprehension of performance. 
 vcacheStats :: VCache -> IO VCacheStats
-vcacheStats (VCache vc _) = withRdOnlyLock (vcache_rwlock vc) $ do
+vcacheStats (VCache vc _) = withRdOnlyTxn vc $ \ txnStat -> do
     let db = vcache_db_env vc
     envInfo <- mdb_env_info db
     envStat <- mdb_env_stat db
-    txnStat <- mdb_txn_begin db Nothing True
     memStat <- mdb_stat' txnStat (vcache_db_memory vc)
     rootStat <- mdb_stat' txnStat (vcache_db_vroots vc)
     hashStat <- mdb_stat' txnStat (vcache_db_caddrs vc)
-    mdb_txn_abort txnStat
     memVRefsMap <- readIORef (vcache_mem_vrefs vc)
     memPVarsMap <- readIORef (vcache_mem_pvars vc)
     allocSt <- readIORef (vcache_allocator vc)

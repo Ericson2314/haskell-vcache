@@ -66,6 +66,8 @@ instance (VCacheable a) => VCacheable (PVar a) where
 instance VCacheable () where
     get = return ()
     put _ = return ()
+    {-# INLINE get #-}
+    {-# INLINE put #-}
 
 instance (VCacheable a) => VCacheable (Maybe a) where
     get = getWord8 >>= \ jn ->

@@ -7,10 +7,8 @@ module Database.VCache.Types
     , Eph(..), EphMap 
     , PVar(..), RDV
     , PVEph(..), PVEphMap
-    , VTx(..), TxW(..), VTxBatch(..), liftSTM
-    , VCache(..)
-    , VSpace(..)
-    , VCacheStats(..)
+    , VTx(..), VTxState(..), TxW(..), VTxBatch(..)
+    , VCache(..), VSpace(..), VCacheStats(..)
     , VPut(..), VPutS(..), VPutR(..), PutChild(..)
     , VGet(..), VGetS(..), VGetR(..)
     , VCacheable(..)
@@ -18,7 +16,12 @@ module Database.VCache.Types
 
     -- a few utilities
     , allocFrameSearch
-    , withRdOnlyTxn, withByteStringVal
+    , withRdOnlyTxn
+    , withByteStringVal
+    , getVTxSpace
+    , markForWrite
+    , markDurableTransaction
+    , liftSTM
     ) where
 
 import Data.Bits
@@ -59,21 +62,34 @@ isPVarAddr = not . isVRefAddr
 -- | A VRef is an opaque reference to an immutable value stored in an
 -- auxiliary address space backed by the filesystem (via LMDB). VRef 
 -- allows very large values to be represented without burdening the 
--- process heap or Haskell garbage collector. The assumption is that
--- the very large value doesn't need to be in memory all at once.
+-- process heap or Haskell garbage collector. 
 --
 -- The API involving VRefs is conceptually pure.
 --
---     vref     :: (VCacheable a) => VSpace -> a -> VRef a
---     deref    :: VRef a -> a
--- 
--- Construction must serialize the value, hash the serialized form
--- (for structure sharing), and write it into the backend. Deref will
--- read the serialized form, parse the value back into Haskell memory,
--- and cache it locally. Very large values and domain models are 
--- supported by allowing VRefs and PVars to themselves be cacheable.
+-- > vref  :: (VCacheable a) => VSpace -> a -> VRef a
+-- > deref :: VRef a -> a
 --
--- Developers have some ability to bypass or influence cache behavior.
+-- Each VRef acts as a pointer to the underlying data, which may be
+-- dereferenced. When dereferenced, the value will typically remain
+-- cached in memory for a short while, on the assumption that values
+-- part of the active working set will be deref'd frequently. Cache
+-- behavior may be bypassed or controlled with variations on deref.
+--
+-- Large data structures are possible because VRefs themselves are
+-- serializable as part of modeling large data structures. Tree-like
+-- data can be modeled, and only the active nodes from the tree need
+-- be loaded into memory. 
+--
+-- VRefs implicitly support structure sharing. Two values with the
+-- same serialized form will use the same VRef address. Developers
+-- may leverage this feature, e.g. directly compare VRefs to test
+-- for structural equality, or support memoization or interning. 
+--
+-- VRefs are read-optimized, with the assumption that you will 
+-- deref more frequently than you will construct vrefs. However,
+-- constructing VRefs is still reasonably efficient. Unless the
+-- assumption breaks down in an extreme way, VCache is probably
+-- okay.
 --
 data VRef a = VRef 
     { vref_addr   :: {-# UNPACK #-} !Address            -- ^ address within the cache
@@ -115,28 +131,22 @@ data Cache a
 --     otherwise, touch counter for timing by GC
 --
 
--- | A PVar is a mutable variable backed by VCache, and which may be
--- referenced by cached values. PVars support ACID transactions. The
--- transactions may be combined with STM updates on ephemeral TVar or
--- TArray resources. This enables convenient composition of persistent
--- and ephemeral models. 
+-- | A PVar is a mutable variable backed by VCache. PVars can be read
+-- or updated transactionally (see VTx), and may store by reference
+-- as part of domain data (see VCacheable). PVars are often anonymous,
+-- though named root PVars provide a basis for persistence.
 --
--- The first read of a PVar is lazy, i.e. contents won't be read from
--- the LMDB file until necessary. After loaded, PVar contents remain
--- in memory unless the PVar itself is GC'd from Haskell memory. Use 
--- PVars together with VRefs where you desire memory-cached content
--- for data models larger than system memory.
--- 
--- VCache provides a set of named root PVars as a basis for persistent
--- applications. Anonymous PVars may be created at any time to support
--- arbitrary data models.
+-- PVar contents are locked into Haskell memory after the first read,
+-- though may be released (and later reloaded, e.g. via loadRootPVar)
+-- if the PVar itself is fully GC'd from the Haskell layer. Use PVars
+-- containing VRefs for very large domain models.
 --
 -- Programmers must be careful with regards to cyclic references among
 -- PVars. The VCache garbage collector uses reference counting, which
--- scales nicely but can leak cyclic data structures. Cycles are not
+-- scales nicely but will leak cyclic data structures. Cycles are not
 -- forbidden. But programmers that use cycles must be careful to break
--- cycles when done with them. Also, cycles must always be reachable  
--- from named root PVars, otherwise they certainly leak upon crash.
+-- cycles when done with them. Cycles should always be reachable from
+-- named root PVars, otherwise they will leak upon crash.
 --
 data PVar a = PVar
     { pvar_addr  :: {-# UNPACK #-} !Address
@@ -161,12 +171,20 @@ type PVEphMap = IntMap [PVEph]
 type RDV a = Either (VGet a) a
 
 
--- | VCache supports a filesystem-backed address space with persistent 
--- variables. The address space can be much larger than system memory, 
--- but the active working set at any given moment should be smaller than
--- system memory. The persistent variables are named by bytestring, and
--- support a filesystem directory-like structure to easily decompose a
--- persistent application into persistent subprograms.
+-- | VCache supports a filesystem-backed address space plus a set of
+-- persistent, named root variables that can be loaded from one run 
+-- of the application to another. VCache supports a simple filesystem
+-- like model to resist namespace collisions between named roots.
+--
+-- > openVCache   :: Int -> FilePath -> IO VCache
+-- > vcacheSubdir :: ByteString -> VCache -> VCache
+-- > loadRootPVar :: (VCacheable a) => VCache -> ByteString -> a -> PVar a
+--
+-- The normal use of VCache is to open VCache in the main function, 
+-- use vcacheSubdir for each major framework, plugin, or independent
+-- component that might need persistent storage, then load at most a
+-- few root PVars per component. Most domain modeling should be at 
+-- the data layer, i.e. the type held by the PVar.
 --
 -- See VSpace, VRef, and PVar for more information.
 data VCache = VCache
@@ -174,10 +192,22 @@ data VCache = VCache
     , vcache_path  :: !ByteString
     } deriving (Eq)
 
--- | VSpace is the abstract address space used by VCache. VSpace allows
--- construction of VRef values, and may be accessed via VRef or VCache.
--- Unlike the whole VCache object, VSpace does not permit construction of
--- PVars. From the client's perspective, VSpace is just an opaque handle.
+-- | VSpace is the virtual address space used by VCache. VSpace allows
+-- construction of VRefs and anonymous PVars, and is necessary to run
+-- transactions. VSpace may be acquired from VRef, PVar, or VCache. 
+--
+-- This virtual address space can be much larger than system memory,
+-- potentially many terabytes. Unlike conventional address space, the
+-- VSpace is elastic: any number of bytes may be stored at an address.
+-- This allows PVar contents to easily vary in size over time. Garbage
+-- collection is based on reference counting, which scales nicely and
+-- does not require excessive paging.
+--
+-- Because this address space is backed by file, it is very easy to
+-- support persistent references and data structures. However, root
+-- PVars (the foundation for persistence) must be named relative to
+-- a VCache to support simple namespaces or subdirectories.
+--
 data VSpace = VSpace
     { vcache_lockfile   :: {-# UNPACK #-} !FileLock -- block concurrent use of VCache file
 
@@ -288,11 +318,13 @@ withRdOnlyTxn vc = withLock . bracket newTX endTX where
     withLock = withRdOnlyLock (vcache_rwlock vc)
     newTX = mdb_txn_begin (vcache_db_env vc) Nothing True
     endTX = mdb_txn_abort
+{-# INLINE withRdOnlyTxn #-}
 
 withByteStringVal :: ByteString -> (MDB_val -> IO a) -> IO a
 withByteStringVal (BSI.PS fp off len) action = withForeignPtr fp $ \ p ->
     action $ MDB_val { mv_size = fromIntegral len
                      , mv_data = p `plusPtr` off }
+{-# INLINE withByteStringVal #-}
     
 
 
@@ -426,37 +458,66 @@ data VCacheStats = VCacheStats
         } deriving (Show, Ord, Eq)
 
 
--- | The VTx transactions allow atomic updates to both PVars and STM
--- resources, providing a simple basis for consistency between the
--- persistent and ephemeral resources.
+-- | The VTx transactions allow atomic updates to both PVars from 
+-- one VSpace and arbitrary STM resources (TVars, TArrays, and so
+-- on). The ability to lift STM operations provides a convenient
+-- basis for composition of persistent and ephemeral data models.
 --
--- Durability is optional: after a VTx transaction completes, PVar
--- updates are batched and committed to LMDB by a background thread.
--- Multiple transactions may be committed together, amortizing any
--- synchronization costs. Durable transactions will wait on a signal
--- that all content has been pushed to disk. 
+-- VTx transactions support the full set of ACID properties, but are
+-- only ACI by default. Durability is optional. Durability may be 
+-- indicated at any time during the transaction, depending on the 
+-- domain model and states involved. Non-durable transactions have
+-- just a small amount of additional overhead compared to STM. But
+-- durability requires an expensive wait for a background writer
+-- thread to signal that content is fully consistent with the disk.
+--
+-- Transactions that run around the same time will frequently be
+-- batched, i.e. such that the writer only serializes occasional
+-- intermediate values for rapidly updating PVars. Synchronization
+-- overheads will often be amortized among many transactions.
 -- 
--- Note: The queue that records batches of PVars for serialization is
--- unfortunately a bottleneck for parallelism. Effective parallelism
--- may require shifting expensive computations outside of transactions,
--- and keeping transactions minimal or leveraging laziness.
+-- Note: Unfortunately, VCache transactions do require updating a
+-- shared TVar in the final step. This may hinder parallelism by
+-- introducing conflicts between transactions. Developers should 
+-- shift bulky computations outside of transactions to reduce the
+-- probability and impact of conflicts.
 -- 
-newtype VTx a = VTx { _vtx :: StateT [(VSpace,WriteLog)] STM a }
+newtype VTx a = VTx { _vtx :: StateT VTxState STM a }
     deriving (Monad, Functor, Applicative, Alternative, MonadPlus)
-    -- basically, just an STM transaction that additionally tracks
-    -- involved VSpaces (in case of durable read-only transaction)
-    -- and a writelog within each space (for the main batch). 
-    -- 
-    -- List is delivered to the writer threads only if the transaction
-    -- commits. Serialization is lazy to better support batching. 
+
+-- | In addition to the STM transaction, I need to track whether
+-- the transaction is durable (such that developers may choose 
+-- based on internal domain-model concerns) and which variables
+-- have been read or written. All PVars involved must be part of
+-- the same VSpace.
+data VTxState = VTxState
+    { vtx_space     :: !VSpace
+    , vtx_writes    :: !WriteLog
+    , vtx_durable   :: !Bool
+    }
 
 -- | run an arbitrary STM operation as part of a VTx transaction.
 liftSTM :: STM a -> VTx a
 liftSTM = VTx . lift
 
+getVTxSpace :: VTx VSpace
+getVTxSpace = VTx (gets vtx_space)
+{-# INLINE getVTxSpace #-}
+
+markForWrite :: PVar a -> VTx ()
+markForWrite pvar = VTx $ modify $ \ vtx ->
+    let writes' = (TxW pvar) : vtx_writes vtx in
+    vtx { vtx_writes = writes' }
+{-# INLINE markForWrite #-}
+
+markDurableTransaction :: VTx ()
+markDurableTransaction = VTx $ modify $ \ vtx -> 
+    vtx { vtx_durable = True }
+{-# INLINE markDurableTransaction #-}
+
 
 type WriteLog  = [TxW]
-data TxW = forall a . TxW !(PVar a) {- a -}
+data TxW = forall a . TxW !(PVar a)
     -- note: PVars should not be GC'd before written to disk. An
     -- alternative is that `loadPVar` waits on active writes, or
     -- accesses the global write log. But it's easiest to simply
@@ -600,6 +661,5 @@ class (Typeable a) => VCacheable a where
 
     -- | Parse a value from its serialized representation into memory.
     get :: VGet a
-
 
 

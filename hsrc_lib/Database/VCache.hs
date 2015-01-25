@@ -3,8 +3,8 @@
 module Database.VCache
     ( VRef
     , PVar
-    , VCache
-    , openVCache
+    , VCache, openVCache
+    , VSpace, vcache_space, vref_space, pvar_space
     , module Database.VCache.VCacheable
     , module Database.VCache.Stats
     , module Database.VCache.Path
@@ -13,7 +13,7 @@ module Database.VCache
     -- * Utility
     ) where
 
-import Database.VCache.Types (VRef, PVar, VCache)
+import Database.VCache.Types 
 import Database.VCache.VCacheable
 import Database.VCache.Open
 import Database.VCache.Stats

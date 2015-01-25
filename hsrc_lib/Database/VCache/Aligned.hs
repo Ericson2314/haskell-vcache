@@ -21,7 +21,7 @@ peekAligned = peekAligned' undefined
 {-# INLINE peekAligned #-}
 
 -- | An alignment-sensitive poke. Will poke data into aligned
--- memory prior to performing 'poke'.
+-- memory then copy it into the destination memory.
 pokeAligned :: (Storable a) => Ptr a -> a -> IO ()
 pokeAligned = pokeAligned' undefined
 {-# INLINE pokeAligned #-}
