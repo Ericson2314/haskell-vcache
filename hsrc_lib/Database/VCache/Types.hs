@@ -499,6 +499,7 @@ data VTxState = VTxState
 -- | run an arbitrary STM operation as part of a VTx transaction.
 liftSTM :: STM a -> VTx a
 liftSTM = VTx . lift
+{-# INLINE liftSTM #-}
 
 getVTxSpace :: VTx VSpace
 getVTxSpace = VTx (gets vtx_space)
