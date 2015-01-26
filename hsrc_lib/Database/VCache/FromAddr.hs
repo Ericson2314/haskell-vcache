@@ -25,17 +25,10 @@ import Unsafe.Coerce
 import Database.VCache.Types
 -- import Database.VCache.RWLock
 
--- | Obtain a VRef given an address. Begins in a not-cached state.
-addr2vref :: (VCacheable a) => VSpace -> Address -> IO (VRef a)
-addr2vref space addr = _addr2vref_ini space addr NotCached
-{-# INLINE addr2vref #-}
-
--- | Obtain a VRef given an address and value. The given value will
--- be used as the initial cache contents, but only if the cache does
--- not already exist. If the cache exists, the existing cache will
--- be shared using whatever state it already has.
-_addr2vref_ini :: (VCacheable a) => VSpace -> Address -> Cache a -> IO (VRef a)
-_addr2vref_ini space addr ini = 
+-- | Obtain a VRef given an address and value. The given address will
+-- not be cached initially.
+addr2vref :: (VCacheable a) => VSpace -> Address -> Cache a -> IO (VRef a)
+addr2vref space addr ini = 
     if not (isVRefAddr addr) then fail ("invalid VRef address " ++ show addr) else
     loadMemCache undefined space addr ini >>= \ cache ->
     return $! VRef 
@@ -44,7 +37,7 @@ _addr2vref_ini space addr ini =
         , vref_space = space
         , vref_parse = get
         }
-{-# INLINABLE _addr2vref_ini #-}
+{-# INLINABLE addr2vref #-}
 
 -- | Load or Create the cache for a given location and type.
 loadMemCache :: (Typeable a) => a -> VSpace -> Address -> Cache a -> IO (IORef (Cache a))

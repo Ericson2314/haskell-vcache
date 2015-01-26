@@ -115,7 +115,7 @@ getVRef = VGet $ \ s ->
     case (vget_children s) of
         (c:cs) | isVRefAddr c -> do
             let s' = s { vget_children = cs }
-            r <- addr2vref (vget_space s) c
+            r <- addr2vref (vget_space s) c NotCached
             return (VGetR r s')
         _ -> return (VGetE "could not parse value reference")
 {-# INLINABLE getVRef #-}

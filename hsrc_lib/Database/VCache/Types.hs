@@ -3,7 +3,7 @@
 -- Internal file. Lots of types. Lots of coupling.
 module Database.VCache.Types
     ( Address, isVRefAddr, isPVarAddr
-    , VRef(..), Cache(..)
+    , VRef(..), Cache(..), CacheMode(..)
     , Eph(..), EphMap 
     , PVar(..), RDV
     , PVEph(..), PVEphMap
@@ -22,6 +22,8 @@ module Database.VCache.Types
     , markForWrite
     , markDurableTransaction
     , liftSTM
+
+    , mkVRefCache
     ) where
 
 import Data.Bits
@@ -30,7 +32,7 @@ import Data.Function (on)
 import Data.Typeable
 import Data.IORef
 import Data.IntMap.Strict (IntMap)
--- import Data.Map.Strict (Map)
+import Data.Map.Strict (Map)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Internal as BSI
 import Control.Monad
@@ -119,17 +121,37 @@ data Cache a
         = NotCached 
         | Cached a {-# UNPACK #-} !Word16
 
+data CacheMode
+        = CacheMode0 -- short timeout
+        | CacheMode1 -- medium timeout
+        | CacheMode2 -- long timeout
+        | CacheMode3 -- maximum timeout
+
 --
 -- cache bitfield for mode:
---   bit 0..1: cache control mode.
---     no timeout, short timeout, long timeout, locked
---   bit 2..6: heuristic weight, log scale.
---     bytes + 80*(refs+1)
---     size heuristic is 2^(N+8)
+--   bit 0..4: heuristic weight, log scale
+--     weight = bytes + 80 * (deps + 1)
+--     log scale: 2^(N+8), max N=31
+--   bits 5..6: timeout
+--      0 -> 8   (less than one second)
+--      1 -> 32
+--      2 -> 128
+--      3 -> 511 (almost a minute)
 --   bits 7..15:
---     if locked, count of locks (max val = inf).
---     otherwise, touch counter for timing by GC
---
+--      touch counter (value 0..511) for timeout
+--      reset to zero on every deref 
+
+-- | mkVRefCache val nBytes nDeps 
+mkVRefCache :: a -> Int -> Int -> CacheMode -> Cache a
+mkVRefCache val nBytes nDeps cm = Cached val cw where
+    w = nBytes + 80 * (nDeps + 1)
+    cw = m .|. cs 0 256
+    cs r k = if ((k > w) || (r > 30)) then r else cs (r+1) (k*2)
+    m = case cm of
+            CacheMode0 -> 0
+            CacheMode1 -> 1 `shiftL` 5
+            CacheMode2 -> 2 `shiftL` 5
+            CacheMode3 -> 3 `shiftL` 5
 
 -- | A PVar is a mutable variable backed by VCache. PVars can be read
 -- or updated transactionally (see VTx), and may store by reference
@@ -194,19 +216,12 @@ data VCache = VCache
 
 -- | VSpace is the virtual address space used by VCache. VSpace allows
 -- construction of VRefs and anonymous PVars, and is necessary to run
--- transactions. VSpace may be acquired from VRef, PVar, or VCache. 
+-- transactions. VSpace may be acquired via VRef, PVar, or VCache. 
 --
 -- This virtual address space can be much larger than system memory,
--- potentially many terabytes. Unlike conventional address space, the
--- VSpace is elastic: any number of bytes may be stored at an address.
--- This allows PVar contents to easily vary in size over time. Garbage
--- collection is based on reference counting, which scales nicely and
--- does not require excessive paging.
---
--- Because this address space is backed by file, it is very easy to
--- support persistent references and data structures. However, root
--- PVars (the foundation for persistence) must be named relative to
--- a VCache to support simple namespaces or subdirectories.
+-- potentially many terabytes. The space is backed by file, enabling
+-- easy persistence of data structures. The space is elastic: a PVar
+-- can easily vary in size from one update to another.
 --
 data VSpace = VSpace
     { vcache_lockfile   :: {-# UNPACK #-} !FileLock -- block concurrent use of VCache file
@@ -290,8 +305,8 @@ data Allocator = Allocator
     }
 
 data AllocFrame = AllocFrame 
-    { alloc_list :: [Allocation]        -- all data
-    , alloc_seek :: IntMap [Allocation] -- hashmap
+    { alloc_list :: !(Map Address Allocation) -- allocated addresses
+    , alloc_seek :: !(IntMap [Allocation])    -- hash map (for roots and VRefs)
     }
 
 data Allocation = Allocation

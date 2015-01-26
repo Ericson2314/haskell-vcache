@@ -15,7 +15,8 @@ import Foreign.Ptr
 
 import Data.Bits
 import Data.IORef
-import qualified Data.IntMap as IntMap
+import qualified Data.IntMap.Strict as IntMap
+import qualified Data.Map.Strict as Map
 import qualified Data.ByteString as BS
 import Control.Concurrent.MVar
 import Control.Concurrent.STM.TVar
@@ -67,7 +68,7 @@ openVCache nMB fp = do
 
 vcFlags :: [MDB_EnvFlag] 
 vcFlags = [MDB_NOSUBDIR     -- open file name, not directory name
-          ,MDB_NOSYNC       -- no automatic synchronization
+          ,MDB_NOSYNC       -- we'll sync via separate thread
           ,MDB_NOLOCK       -- leave lock management to VCache
           ]
 
@@ -162,6 +163,6 @@ findLastAddrAllocated txn dbiMemory = alloca $ \ pKey ->
 
 freshAllocator :: Address -> Allocator
 freshAllocator addr =
-    let f0 = AllocFrame [] IntMap.empty in
+    let f0 = AllocFrame Map.empty IntMap.empty in
     Allocator addr (addr-1) f0 f0 f0
 

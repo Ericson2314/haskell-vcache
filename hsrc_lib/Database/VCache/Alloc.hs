@@ -1,3 +1,4 @@
+{-# LANGUAGE ForeignFunctionInterface #-}
 
 -- allocators for PVars and VRefs
 module Database.VCache.Alloc
@@ -6,22 +7,22 @@ module Database.VCache.Alloc
     , newPVar
     , newPVarIO
     , newVRefIO
+    , newVRefIO'
     ) where
 
--- import Control.Exception
--- import Control.Applicative
--- import Control.Monad
+import Control.Exception
+import Control.Monad
+import Data.Word
 import Data.IORef
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
--- import qualified Data.ByteString.Internal as BSI
 import qualified Data.List as L
--- import Data.IntMap (IntMap)
-import qualified Data.IntMap as IntMap
+import qualified Data.Map.Strict as Map
+import qualified Data.IntMap.Strict as IntMap
+import Foreign.C.Types
 import Foreign.Ptr
--- import Foreign.ForeignPtr
 import Foreign.Storable
--- import Control.Concurrent.STM
+import Foreign.Marshal.Alloc
 import GHC.Conc (unsafeIOToSTM)
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -29,12 +30,11 @@ import Database.LMDB.Raw
 
 import Database.VCache.Types
 import Database.VCache.FromAddr
--- import Database.VCache.RWLock
 import Database.VCache.Path
 import Database.VCache.Aligned
 import Database.VCache.VPutFini
--- import Database.VCache.VCacheable
 import Database.VCache.Hash
+
 
 -- | load a root PVar immediately, in the IO monad. This can be more
 -- convenient than loadRootPVar if you need to control where errors
@@ -69,29 +69,23 @@ _loadRootPVarIO vc name defaultVal = withRdOnlyTxn vc $ \ txn ->
 -- PVar name, i.e. in case the same root is allocated multiple times in
 -- a short period.
 allocNamedPVar :: ByteString -> ByteString -> [PutChild] -> Allocator -> (Allocator, Address)
-allocNamedPVar name _data _deps ac =
-    let hkey = allocNameHash 1 name in
-    let match an = isPVarAddr (alloc_addr an) && (name == (alloc_name an)) in
+allocNamedPVar _name _data _deps ac =
+    let hkey = allocNameHash 1 _name in
+    let match an = isPVarAddr (alloc_addr an) && (_name == (alloc_name an)) in
     let ff frm = IntMap.lookup hkey (alloc_seek frm) >>= L.find match in
     case allocFrameSearch ff ac of
         Just an -> (ac, alloc_addr an) -- allocated very recently
         Nothing ->
             let newAddr = alloc_new_addr ac in
-            let an = Allocation { alloc_name = name
+            let an = Allocation { alloc_name = _name
                                 , alloc_data = _data
                                 , alloc_deps = _deps
                                 , alloc_addr = 1 + newAddr
                                 }
-            in  
-            let frm = alloc_frm_next ac in
-            let list' = an : alloc_list frm in
-            let add_an = Just . (an:) . maybe [] id in
-            let seek' = IntMap.alter add_an hkey (alloc_seek frm) in
-            let frm' = AllocFrame list' seek' in
-            let ac' = ac { alloc_new_addr = 2 + newAddr
-                         , alloc_frm_next = frm'
-                         }
-            in (ac', alloc_addr an)
+            in
+            let frm' = addToFrameS an hkey (alloc_frm_next ac) in
+            let ac' = ac { alloc_new_addr = 2 + newAddr, alloc_frm_next = frm' } in
+            (ac', alloc_addr an)
 
 -- | Load a root PVar associated with a VCache. The given name will be
 -- implicitly prefixed based on vcacheSubdir - a simple append operation.
@@ -139,13 +133,8 @@ allocAnonPVarIO _data _deps ac =
                         , alloc_addr = 1 + newAddr
                         }
     in
-    let frm = alloc_frm_next ac in
-    let list' = an : alloc_list frm in
-    let frm' = frm { alloc_list = list' } in
-    let ac' = ac { alloc_new_addr = 2 + newAddr
-                 , alloc_frm_next = frm' 
-                 }
-    in
+    let frm' = addToFrame an (alloc_frm_next ac) in
+    let ac' = ac { alloc_new_addr = 2 + newAddr, alloc_frm_next = frm' } in
     (ac', alloc_addr an)
  
 -- | Create a new, anonymous PVar as part of an active transaction.
@@ -168,7 +157,7 @@ newPVarVTxIO vc ini =
 
 -- Allocate just the new PVar address. Do not store any information
 -- about this PVar in the allocator. Writing the PVar will be delayed
--- to the normal write process, as part of the VTx context.
+-- into the normal write process, i.e. as part of the VTx context.
 allocPVarVTx :: Allocator -> (Allocator, Address)
 allocPVarVTx ac = 
     let newAddr = alloc_new_addr ac in
@@ -176,25 +165,100 @@ allocPVarVTx ac =
     let ac' = ac { alloc_new_addr = 2 + newAddr } in
     (ac', pvAddr)
    
--- | Construct a VRef in the IO monad. Note that constructing a VRef
--- is relatively expensive: it always requires serializing the value
--- and hashing the result (due to structure sharing). VRefs are read
--- optimized, with the assumption that you'll read them, on average,
--- more frequently than you construct them.
---
--- VRefs of multiple different types can potentially share the same
--- address, assuming the same serialized form.
-newVRefIO :: (VCacheable a) => VSpace -> a -> IO (VRef a)
-newVRefIO vc v = 
+-- | Construct a VRef and cache the value (if new)
+newVRefIO :: (VCacheable a) => VSpace -> a -> CacheMode -> IO (VRef a)
+newVRefIO vc v cm =
     runVPutIO vc (put v) >>= \ ((), _data, _deps) ->
-    let hashBytes = hash _data in
-    let nameHash = allocNameHash 1 hashBytes in
-    hashBytes `seq` -- compute before locking
-    error "TODO: newVRefIO'"
-    -- need to obtain a read lock, read the database for any matches on
-    -- the hash function and see if one of those addresses is good, and
-    -- then check the allocator in case the same VRef has been recently
-    -- allocated.
+    allocVRefIO vc _data _deps >>= \ addr ->
+    let c0 = mkVRefCache v (BS.length _data) (L.length _deps) cm in
+    addr2vref vc addr c0
+
+-- | Construct a VRef with initially empty cache (if new)
+newVRefIO' :: (VCacheable a) => VSpace -> a -> IO (VRef a)
+newVRefIO' vc v = 
+    runVPutIO vc (put v) >>= \ ((), _data, _deps) ->
+    allocVRefIO vc _data _deps >>= \ addr ->
+    addr2vref vc addr NotCached
+
+allocVRefIO :: VSpace -> ByteString -> [PutChild] -> IO Address
+allocVRefIO vc _data _deps = 
+    let _name = BS.take 8 $ hash _data in
+    withByteStringVal _name $ \ vName ->
+    withByteStringVal _data $ \ vData ->
+    withRdOnlyTxn vc $ \ txn ->
+    listDups' txn (vcache_db_caddrs vc) vName >>= \ caddrs ->
+    seek (matchCandidate vc txn vData) caddrs >>= \ mbFound ->
+    case mbFound of
+        Nothing -> atomicModifyIORef (vcache_allocator vc) (allocVRef _name _data _deps)
+        Just addr -> return addr
+   
+seek :: (Monad m) => (a -> m (Maybe b)) -> [a] -> m (Maybe b)
+seek _ [] = return Nothing
+seek f (x:xs) = f x >>= continue where
+    continue Nothing = seek f xs
+    continue r@(Just _) = return r 
+
+-- list all values associated with a given key
+listDups' :: MDB_txn -> MDB_dbi' -> MDB_val -> IO [MDB_val]
+listDups' txn dbi vKey = 
+    alloca $ \ pKey ->
+    alloca $ \ pVal ->
+    withCursor' txn dbi $ \ crs -> do
+    let loop l b = 
+            if not b then return l else
+            peek pVal >>= \ v ->
+            mdb_cursor_get' MDB_NEXT_DUP crs pKey pVal >>= \ b' ->
+            loop (v:l) b'
+    poke pKey vKey
+    b0 <- mdb_cursor_get' MDB_SET_KEY crs pKey pVal
+    loop [] b0
+
+-- seek an exact match in the database
+matchCandidate :: VSpace -> MDB_txn -> MDB_val -> MDB_val -> IO (Maybe Address)
+matchCandidate vc txn vData vCandidateAddr = do
+    mbR <- mdb_get' txn (vcache_db_memory vc) vCandidateAddr
+    case mbR of
+        Nothing -> -- this should not happen
+            fail "corrupt database: undefined address in hashmap"
+        Just vData' ->
+            let bSameSize = mv_size vData == mv_size vData' in
+            if not bSameSize then return Nothing else
+            c_memcmp (mv_data vData) (mv_data vData') (mv_size vData) >>= \ o ->
+            if (0 /= o) then return Nothing else
+            liftM Just (readAddr vCandidateAddr)
+
+withCursor' :: MDB_txn -> MDB_dbi' -> (MDB_cursor' -> IO a) -> IO a
+withCursor' txn dbi = bracket g d where
+    g = mdb_cursor_open' txn dbi
+    d = mdb_cursor_close'
+
+readAddr :: MDB_val -> IO Address
+readAddr v =
+    let expectedSize = fromIntegral (sizeOf (undefined :: Address)) in
+    let bBadSize = expectedSize /= mv_size v in
+    if bBadSize then fail "corrupt database: badly formed address in hashmap" else
+    peekAligned (castPtr (mv_data v))
+
+-- allocate a VRef. This will also search the recently allocated addresses for
+-- a potential match in case an identical VRef was very recently allocated!
+allocVRef :: ByteString -> ByteString -> [PutChild] -> Allocator -> (Allocator, Address)
+allocVRef _name _data _deps ac =
+    let hkey = allocNameHash 1 _name in
+    let match an = isVRefAddr (alloc_addr an) && (_data == (alloc_data an)) in
+    let ff frm = IntMap.lookup hkey (alloc_seek frm) >>= L.find match in
+    case allocFrameSearch ff ac of
+        Just an -> (ac, alloc_addr an)
+        Nothing ->
+            let newAddr = alloc_new_addr ac in
+            let an = Allocation { alloc_name = _name
+                                , alloc_data = _data
+                                , alloc_deps = _deps
+                                , alloc_addr = newAddr
+                                }
+            in
+            let frm' = addToFrameS an hkey (alloc_frm_next ac) in
+            let ac' = ac { alloc_new_addr = 2 + newAddr, alloc_frm_next = frm' } in
+            (ac', newAddr)
 
 -- Compute a simple hash function for use within the allocation frames.
 -- This doesn't need to be very good, just fast and good enough to 
@@ -207,3 +271,19 @@ allocNameHash n bs = case BS.uncons bs of
         let n' = (173 * n) + (83 * w8i) in
         allocNameHash n' bs'
 
+-- add annotation to frame without seek
+addToFrame :: Allocation -> AllocFrame -> AllocFrame
+addToFrame an frm =
+    let list' = Map.insert (alloc_addr an) an (alloc_list frm) in
+    frm { alloc_list = list' }
+
+-- add annotation to frame with seek
+addToFrameS :: Allocation -> Int -> AllocFrame -> AllocFrame
+addToFrameS an hkey frm =
+    let list' = Map.insert (alloc_addr an) an (alloc_list frm) in
+    let add_an = Just . (an:) . maybe [] id in
+    let seek' = IntMap.alter add_an hkey (alloc_seek frm) in
+    AllocFrame { alloc_list = list', alloc_seek = seek' }
+
+foreign import ccall unsafe "string.h memcmp" c_memcmp
+    :: Ptr Word8 -> Ptr Word8 -> CSize -> IO CInt
