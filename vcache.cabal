@@ -39,7 +39,7 @@ Homepage: http://github.com/dmbarbour/haskell-vcache
 
 Package-Url: 
 Copyright: (c) 2014 by David Barbour
-License: BSD2
+License: BSD3
 license-file: LICENSE
 Stability: experimental
 build-type: Simple
@@ -85,6 +85,7 @@ Library
     Database.VCache.VRef
     Database.VCache.VTx
     Database.VCache.Read
+    Database.VCache.VGetAux
    
   ghc-options: -Wall -auto-all
 

@@ -24,6 +24,7 @@ import Foreign.Ptr
 import Foreign.Storable
 import Foreign.Marshal.Alloc
 import GHC.Conc (unsafeIOToSTM)
+import Control.Concurrent.MVar
 import System.IO.Unsafe (unsafePerformIO)
 
 import Database.LMDB.Raw
@@ -62,7 +63,10 @@ _loadRootPVarIO vc name defaultVal = withRdOnlyTxn vc $ \ txn ->
             addr2pvar vc addr
         Nothing -> -- first use OR allocated very recently
             runVPutIO vc (put defaultVal) >>= \ ((),_data,_deps) ->
-            atomicModifyIORef (vcache_allocator vc) (allocNamedPVar name _data _deps) >>= \ addr ->
+            let acRef = vcache_allocator vc in
+            let allocFn = allocNamedPVar name _data _deps in
+            atomicModifyIORef acRef allocFn >>= \ addr ->
+            signalAlloc vc >>
             addr2pvar vc addr
 
 -- This variation of PVar allocation will support lookup by the given
@@ -112,7 +116,8 @@ loadRootPVar vc name ini = unsafePerformIO (loadRootPVarIO vc name ini)
 -- more or less equivalent to newTVarIO, except that the PVar may be
 -- referenced from persistent values in the associated VCache. Like
 -- newTVarIO, this can be used from unsafePerformIO. Unlike newTVarIO, 
--- there is no use case for newPVarIO to construct global variables. 
+-- there is no use case for newPVarIO to construct global variables
+-- (because loadRootPVar fulfills that role).
 --
 -- In most cases, you should favor the transactional newPVar.
 --
@@ -120,6 +125,7 @@ newPVarIO :: (VCacheable a) => VSpace -> a -> IO (PVar a)
 newPVarIO vc ini = 
     runVPutIO vc (put ini) >>= \ ((), _data, _deps) ->
     atomicModifyIORef (vcache_allocator vc) (allocAnonPVarIO _data _deps) >>= \ addr ->
+    signalAlloc vc >>
     addr2pvar_new vc addr ini
 
 -- allocate PVar such that its initial value will be stored by the background
@@ -152,6 +158,7 @@ newPVar ini = do
 newPVarVTxIO :: (VCacheable a) => VSpace -> a -> IO (PVar a)
 newPVarVTxIO vc ini = 
     atomicModifyIORef (vcache_allocator vc) allocPVarVTx >>= \ addr ->
+    -- no need to signal allocator in this particular case
     addr2pvar_new vc addr ini
 {-# INLINE newPVarVTxIO #-}
 
@@ -181,6 +188,7 @@ newVRefIO' vc v =
     allocVRefIO vc _data _deps >>= \ addr ->
     addr2vref vc addr NotCached
 
+-- | Match existing structure in database. If not found, allocate one.
 allocVRefIO :: VSpace -> ByteString -> [PutChild] -> IO Address
 allocVRefIO vc _data _deps = 
     let _name = BS.take 8 $ hash _data in
@@ -190,8 +198,13 @@ allocVRefIO vc _data _deps =
     listDups' txn (vcache_db_caddrs vc) vName >>= \ caddrs ->
     seek (matchCandidate vc txn vData) caddrs >>= \ mbFound ->
     case mbFound of
-        Nothing -> atomicModifyIORef (vcache_allocator vc) (allocVRef _name _data _deps)
         Just addr -> return addr
+        Nothing -> 
+            let acRef = vcache_allocator vc in
+            let allocFn = allocVRef _name _data _deps in
+            atomicModifyIORef acRef allocFn >>= \ addr ->
+            signalAlloc vc >> 
+            return addr
    
 seek :: (Monad m) => (a -> m (Maybe b)) -> [a] -> m (Maybe b)
 seek _ [] = return Nothing
@@ -285,6 +298,10 @@ addToFrameS an hkey frm =
     let add_an = Just . (an:) . maybe [] id in
     let seek' = IntMap.alter add_an hkey (alloc_seek frm) in
     AllocFrame { alloc_list = list', alloc_seek = seek' }
+
+-- report allocation to the writer threads
+signalAlloc :: VSpace -> IO ()
+signalAlloc vc = void $ tryPutMVar (vcache_signal vc) () 
 
 foreign import ccall unsafe "string.h memcmp" c_memcmp
     :: Ptr Word8 -> Ptr Word8 -> CSize -> IO CInt

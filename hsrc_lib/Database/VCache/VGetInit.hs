@@ -5,11 +5,9 @@ module Database.VCache.VGetInit
     ) where
 
 import Data.Bits
-import Data.Word
 import Foreign.Ptr
-import Foreign.Storable
 import Database.VCache.Types
-import Database.VCache.VGet
+import Database.VCache.VGetAux
 
 -- | For VGet from the database, we start with just a pointer and a
 -- size. To process the VGet data, we also need to read addresses 
@@ -63,15 +61,6 @@ readAddrBytes' nAccum =
     if (w8 < 0x80) then return nAccum' else
     readAddrBytes' nAccum'
 
-getWord8FromEnd :: VGet Word8
-getWord8FromEnd = VGet $ \ s ->
-    let pSrc = vget_limit s `plusPtr` (-1) in
-    let s' = s { vget_limit = pSrc } in
-    if (pSrc < vget_target s) then return eBadAddressRegion else
-    peek pSrc >>= \ w8 ->
-    return (VGetR w8 s')
-{-# INLINE getWord8FromEnd #-}
-
 -- read a variable list of at least one address
 readAddrs :: VGet [Address]
 readAddrs = 
@@ -88,3 +77,4 @@ readAddrs' addrs nLast =
     let nCurr = nLast + nOff in
     let addr = fromIntegral nCurr in
     addr `seq` readAddrs' (addr:addrs) nCurr
+

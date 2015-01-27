@@ -27,7 +27,7 @@ import Control.Applicative
 import Data.Bits
 import Data.Char
 import Data.Word
-import Foreign.Ptr (plusPtr,castPtr,Ptr)
+import Foreign.Ptr
 import Foreign.Storable (Storable(..))
 import Foreign.Marshal.Alloc (mallocBytes,finalizerFree)
 import Foreign.Marshal.Utils (copyBytes)
@@ -41,7 +41,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Database.VCache.Types
 import Database.VCache.Aligned
 import Database.VCache.FromAddr
-
+import Database.VCache.VGetAux 
 
 -- | isolate a parser to a subset of bytes and value references. The
 -- child parser must process its entire input (all bytes and values) 
@@ -84,29 +84,6 @@ takeExact' :: [a] -> Int -> [a] -> Maybe ([a],[a])
 takeExact' l 0 r = Just (L.reverse l, r)
 takeExact' l n (r:rs) = takeExact' (r:l) (n-1) rs
 takeExact' _ _ _ = Nothing
-
--- consuming a number of bytes (for unsafe VGet operations)
---  does not perform a full isolation
-consuming :: Int -> VGet a -> VGet a
-consuming n op = VGet $ \ s ->
-    let pConsuming = vget_target s `plusPtr` n in
-    if (pConsuming > vget_limit s) then return (VGetE "not enough data") else 
-    _vget op s 
-{-# RULES
-"consuming.consuming"   forall n1 n2 op . consuming n1 (consuming n2 op) = consuming (max n1 n2) op
-"consuming>>consuming"  forall n1 n2 f g . consuming n1 f >> consuming n2 g = consuming (n1+n2) (f>>g)
-"consuming>>=consuming" forall n1 n2 f g . consuming n1 f >>= consuming n2 . g = consuming (n1+n2) (f>>=g)
- #-}
-{-# INLINABLE consuming #-}
-
--- | Read one byte of data, or fail if not enough data.
-getWord8 :: VGet Word8 
-getWord8 = consuming 1 $ VGet $ \ s -> do
-    let p = vget_target s
-    r <- peekByte p
-    let s' = s { vget_target = p `plusPtr` 1 }
-    return (VGetR r s')
-{-# INLINE getWord8 #-}
 
 -- | Load a VRef, just the reference rather than the content. User must
 -- know which type of value. VRef content is not read until deref. 
@@ -234,11 +211,6 @@ getWord64be = consuming 8 $ VGet $ \ s -> do
     return (VGetR r s')
 {-# INLINE getWord64be #-}
 
--- to simplify type inference
-peekByte :: Ptr Word8 -> IO Word8
-peekByte = peek
-{-# INLINE peekByte #-}
-
 -- | Read a Storable value. In this case, the content should be
 -- bytes only, since pointers aren't really meaningful when persisted.
 -- Data is copied to an intermediate structure via alloca to avoid
@@ -256,35 +228,6 @@ _getStorable _dummy =
         a <- peekAligned (castPtr pTgt)
         return (VGetR a s')
 {-# INLINE _getStorable #-}
-
-
--- | Get an integer represented in the Google protocol buffers zigzag
--- 'varint' encoding, e.g. as produced by 'putVarInt'. 
-getVarInt :: VGet Integer
-getVarInt = unZigZag <$> getVarNat
-{-# INLINE getVarInt #-}
-
--- undo protocol buffers zigzag encoding
-unZigZag :: Integer -> Integer
-unZigZag n =
-    let (q,r) = n `divMod` 2 in
-    if (1 == r) then negate q - 1
-                else q
-{-# INLINE unZigZag #-}
-
--- | Get a non-negative number represented in the Google protocol
--- buffers 'varint' encoding, e.g. as produced by 'putVarNat'.
-getVarNat :: VGet Integer
-getVarNat = getVarNat' 0
-{-# INLINE getVarNat #-}
-
--- getVarNat' uses accumulator
-getVarNat' :: Integer -> VGet Integer
-getVarNat' !n =
-    getWord8 >>= \ w ->
-    let n' = (128 * n) + fromIntegral (w .&. 0x7f) in
-    if (w < 128) then return $! n'
-                 else getVarNat' n'
 
 -- | Load a number of bytes from the underlying object. A copy is
 -- performed in this case (typically no copy is performed by VGet,
@@ -380,14 +323,4 @@ lookAheadE op = VGet $ \ s ->
     case result of
         VGetR l@(Left _) _ -> VGetR l s
         other -> other
-
--- | isEmpty will return True iff there is no available input (neither
--- references nor values).
-isEmpty :: VGet Bool
-isEmpty = VGet $ \ s ->
-    let bEOF = (vget_target s == vget_limit s) 
-            && (L.null (vget_children s))
-    in
-    bEOF `seq` return (VGetR bEOF s)
-
 
