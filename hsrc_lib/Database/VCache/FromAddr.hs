@@ -128,7 +128,7 @@ loadPVarData _dummy space addr ini = atomicModifyIORef pvtbl loadData >>= id whe
     getData = unsafeDupablePerformIO . Weak.deRefWeak . _unsafeDataWeak
     loadData mpv = case IntMap.lookup hkey mpv >>= L.find match of
         Just e ->
-            if (pveph_type e /= typa) then (mpv, fail (typeMismatch e "")) else
+            if (pveph_type e /= typa) then (mpv, fail (typeMismatch e)) else
             case getData e of
                 Just d -> (mpv, return d)
                 Nothing -> newData mpv
@@ -141,7 +141,7 @@ loadPVarData _dummy space addr ini = atomicModifyIORef pvtbl loadData >>= id whe
         let addEph = Just . (eph:) . maybe [] id
         let mpv' = IntMap.alter addEph hkey mpv
         return (mpv', return d)
-    typeMismatch e = 
+    typeMismatch e = ($ "") $
         showString "PVar user error: address " . shows addr .
         showString " type mismatch on load. " .
         showString " Existing: " . shows (pveph_type e) .
