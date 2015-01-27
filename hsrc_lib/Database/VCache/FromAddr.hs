@@ -120,7 +120,7 @@ addr2pvar_ini space addr ini =
 {-# INLINABLE addr2pvar_ini #-}
 
 loadPVarData :: (Typeable a) => a -> VSpace -> Address -> RDV a -> IO (TVar (RDV a))
-loadPVarData _dummy space addr ini = atomicModifyIORef pvtbl loadData where
+loadPVarData _dummy space addr ini = atomicModifyIORef pvtbl loadData >>= id where
     pvtbl = vcache_mem_pvars space
     typa = typeOf _dummy
     hkey = fromIntegral addr
@@ -128,11 +128,10 @@ loadPVarData _dummy space addr ini = atomicModifyIORef pvtbl loadData where
     getData = unsafeDupablePerformIO . Weak.deRefWeak . _unsafeDataWeak
     loadData mpv = case IntMap.lookup hkey mpv >>= L.find match of
         Just e ->
-            if (pveph_type e == typa) then tryEph mpv e else
-            error "PVar error: multiple types for single address" 
-        Nothing -> newData mpv
-    tryEph mpv eph = case getData eph of
-        Just d -> (mpv, d)
+            if (pveph_type e /= typa) then (mpv, fail (typeMismatch e "")) else
+            case getData e of
+                Just d -> (mpv, return d)
+                Nothing -> newData mpv
         Nothing -> newData mpv
     newData = unsafePerformIO . initData
     initData mpv = do
@@ -141,7 +140,12 @@ loadPVarData _dummy space addr ini = atomicModifyIORef pvtbl loadData where
         let eph = PVEph { pveph_addr = addr, pveph_type = typa, pveph_weak = wd }
         let addEph = Just . (eph:) . maybe [] id
         let mpv' = IntMap.alter addEph hkey mpv
-        return (mpv', d)
+        return (mpv', return d)
+    typeMismatch e = 
+        showString "PVar user error: address " . shows addr .
+        showString " type mismatch on load. " .
+        showString " Existing: " . shows (pveph_type e) .
+        showString " Expecting: " . shows typa
 {-# NOINLINE loadPVarData #-}
 
 _unsafeDataWeak :: PVEph -> Weak (TVar (RDV a))

@@ -95,7 +95,7 @@ isPVarAddr = not . isVRefAddr
 data VRef a = VRef 
     { vref_addr   :: {-# UNPACK #-} !Address            -- ^ address within the cache
     , vref_cache  :: {-# UNPACK #-} !(IORef (Cache a))  -- ^ cached value & weak refs 
-    , vref_space  :: !VSpace                            -- ^ cache manager for this VRef
+    , vref_space  :: !VSpace                            -- ^ virtual address space for VRef
     , vref_parse  :: !(VGet a)                          -- ^ parser for this VRef
     } deriving (Typeable)
 instance Eq (VRef a) where (==) = (==) `on` vref_cache
@@ -177,7 +177,7 @@ data PVar a = PVar
     { pvar_addr  :: {-# UNPACK #-} !Address
     , pvar_data  :: {-# UNPACK #-} !(TVar (RDV a))
     , pvar_write :: !(a -> VPut ())
-    , pvar_space :: !VSpace
+    , pvar_space :: !VSpace -- ^ virtual address space for PVar
     } deriving (Typeable)
 instance Eq (PVar a) where (==) = (==) `on` pvar_data
 
@@ -212,7 +212,7 @@ data RDV a = RDV a
 --
 -- See VSpace, VRef, and PVar for more information.
 data VCache = VCache
-    { vcache_space :: !VSpace 
+    { vcache_space :: !VSpace -- ^ virtual address space for VCache
     , vcache_path  :: !ByteString
     } deriving (Eq)
 

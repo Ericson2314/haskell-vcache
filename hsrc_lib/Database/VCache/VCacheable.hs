@@ -9,6 +9,7 @@ module Database.VCache.VCacheable
 import Control.Applicative
 import Control.Monad
 
+import Data.Word
 import Data.Char
 import qualified Data.List as L
 import qualified Data.ByteString as BS
@@ -35,6 +36,12 @@ instance VCacheable Integer where
 instance VCacheable Char where 
     get = getc
     put = putc
+    {-# INLINE get #-}
+    {-# INLINE put #-}
+
+instance VCacheable Word8 where
+    get = getWord8
+    put = putWord8
     {-# INLINE get #-}
     {-# INLINE put #-}
 

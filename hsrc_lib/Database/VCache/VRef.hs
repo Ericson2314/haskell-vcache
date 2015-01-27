@@ -7,9 +7,13 @@ module Database.VCache.VRef
     , unsafeVRefAddr
     ) where
 
-import System.IO.Unsafe (unsafePerformIO)
+import Control.Monad
+import Data.Bits
+import Data.IORef
+import System.IO.Unsafe 
 import Database.VCache.Types
 import Database.VCache.Alloc
+import Database.VCache.Read
 
 -- | Construct a VRef for a cacheable value. This will search for a
 -- matching value on disk (for structure sharing) and otherwise will
@@ -31,22 +35,34 @@ vref vc v = unsafePerformIO (newVRefIO vc v CacheMode1)
 vref' :: (VCacheable a) => VSpace -> a -> VRef a
 vref' vc v = unsafePerformIO (newVRefIO' vc v)
 
+readVRef :: VRef a -> IO (a, Int)
+readVRef v = readAddrIO (vref_space v) (vref_addr v) (vref_parse v)
+{-# INLINE readVRef #-}
+
 -- | Dereference a VRef, obtaining its value. If the value is not in
 -- cache, it will be read into the database then cached. Otherwise, 
 -- the value is read from cache and any expiration timer is reset.
 deref :: VRef a -> a
-deref = error "TODO: deref"
+deref v = unsafePerformIO $
+    unsafeInterleaveIO (readVRef v) >>= \ lazy_read_rw ->
+    atomicModifyIORef (vref_cache v) $ \ c -> case c of
+        Cached r w -> 
+            let c' = Cached r (w .&. 0x7f) in 
+            c' `seq` (c',r)
+        NotCached ->
+            let (r,w) = lazy_read_rw in
+            let c' = mkVRefCache r w CacheMode1 in
+            c' `seq` (c',r)
 
--- | Dereference a VRef, but do not cache the value. If the value is
--- already cached, the cached value will be used, but the expiration
--- is not reset. If the value is read from the database, its value 
--- will not be cached at all. This can be useful in some contexts,
--- when you know you won't be using the cache. 
---
--- Note: A VRef cache will also be cleared if the VRef itself is GC'd,
--- so often it is sufficient to use dref' just near some root values.
+-- | Dereference a VRef. Will use the cached value if available, but
+-- will not cache the value or reset any expiration timers. This can
+-- be useful when processing large values, since it can limit how long
+-- those values remain in memory.
 deref' :: VRef a -> a
-deref' = error "TODO: deref'"
+deref' v = unsafePerformIO $ 
+    readIORef (vref_cache v) >>= \ c -> case c of
+        Cached r _ -> return r
+        NotCached -> liftM fst (readVRef v)
 
 -- | Each VRef has an numeric address in the VSpace. This address is
 -- non-deterministic, and essentially independent of the arguments to

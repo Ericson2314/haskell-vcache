@@ -23,7 +23,8 @@ vcacheStats (VCache vc _) = withRdOnlyTxn vc $ \ txnStat -> do
     memVRefsMap <- readIORef (vcache_mem_vrefs vc)
     memPVarsMap <- readIORef (vcache_mem_pvars vc)
     allocSt <- readIORef (vcache_allocator vc)
-    let fileSize = (fromIntegral $ me_last_pgno envInfo) * (fromIntegral $ ms_psize envStat)
+    let fileSize = (1 + (fromIntegral $ me_last_pgno envInfo)) 
+                 * (fromIntegral $ ms_psize envStat)
     let vrefCount = (fromIntegral $ ms_entries hashStat) 
     let pvarCount = (fromIntegral $ ms_entries memStat) - vrefCount
     let rootCount = (fromIntegral $ ms_entries rootStat)
