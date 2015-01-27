@@ -170,7 +170,8 @@ newVRefIO :: (VCacheable a) => VSpace -> a -> CacheMode -> IO (VRef a)
 newVRefIO vc v cm =
     runVPutIO vc (put v) >>= \ ((), _data, _deps) ->
     allocVRefIO vc _data _deps >>= \ addr ->
-    let c0 = mkVRefCache v (BS.length _data) (L.length _deps) cm in
+    let w = cacheWeight (BS.length _data) (L.length _deps) in
+    let c0 = mkVRefCache v w cm in
     addr2vref vc addr c0
 
 -- | Construct a VRef with initially empty cache (if new)
@@ -225,15 +226,15 @@ matchCandidate vc txn vData vCandidateAddr = do
             if not bSameSize then return Nothing else
             c_memcmp (mv_data vData) (mv_data vData') (mv_size vData) >>= \ o ->
             if (0 /= o) then return Nothing else
-            liftM Just (readAddr vCandidateAddr)
+            liftM Just (peekAddr vCandidateAddr)
 
 withCursor' :: MDB_txn -> MDB_dbi' -> (MDB_cursor' -> IO a) -> IO a
 withCursor' txn dbi = bracket g d where
     g = mdb_cursor_open' txn dbi
     d = mdb_cursor_close'
 
-readAddr :: MDB_val -> IO Address
-readAddr v =
+peekAddr :: MDB_val -> IO Address
+peekAddr v =
     let expectedSize = fromIntegral (sizeOf (undefined :: Address)) in
     let bBadSize = expectedSize /= mv_size v in
     if bBadSize then fail "corrupt database: badly formed address in hashmap" else

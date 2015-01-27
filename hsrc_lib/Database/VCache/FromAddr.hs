@@ -6,13 +6,10 @@ module Database.VCache.FromAddr
     , addr2pvar_new
     ) where
 
+import Control.Monad
 import Data.IORef
--- import Data.Word
 import Data.Typeable
 import Data.Typeable.Internal (TypeRep(..),Fingerprint(..))
--- import Data.Map.Strict (Map)
--- import qualified Data.Map.Strict as M
--- import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.List as L
 import Control.Concurrent.STM.TVar
@@ -23,6 +20,7 @@ import Unsafe.Coerce
 
 -- import Database.LMDB.Raw
 import Database.VCache.Types
+import Database.VCache.Read
 -- import Database.VCache.RWLock
 
 -- | Obtain a VRef given an address and value. The given address will
@@ -75,7 +73,6 @@ _unsafeCoerceWeakCache :: Weak (IORef (Cache b)) -> Weak (IORef (Cache a))
 _unsafeCoerceWeakCache = unsafeCoerce
 {-# INLINE _unsafeCoerceWeakCache #-}
 
-
 -- Hash function for the VRef ephemeron table
 --
 -- In this case, I want to include the type representation
@@ -96,24 +93,22 @@ hashVRef (TypeRep (Fingerprint a b) _ _) addr = hA + hB + hAddr where
 
 
 -- | Obtain a PVar given an address. The PVar will lazily load
--- when first read.
+-- when first read, and only if read.
 addr2pvar :: (VCacheable a) => VSpace -> Address -> IO (PVar a)
-addr2pvar space addr = _addr2pvar_ini space addr (Left get)
+addr2pvar space addr = rdLazy >>= addr2pvar_ini space addr where
+    rdLazy = unsafeInterleaveIO rdStrict
+    rdStrict = liftM (RDV . fst) (readAddrIO space addr get)
 {-# INLINE addr2pvar #-}
 
--- | Given an address for a *new* PVar, with the initial value.
--- This is the same as addr2pvar, but will load the PVar with the
--- given initial value rather than setting it to lazily load on
--- first read. 
---
--- This operation is unsafe (you can lose information) if you don't
--- guarantee that this is the first use of the given PVar address. 
+-- | Given an address for a PVar and an initial value, return the
+-- PVar. The initial value will be dropped if the PVar has already
+-- been loaded with a value.
 addr2pvar_new :: (VCacheable a) => VSpace -> Address -> a -> IO (PVar a)
-addr2pvar_new space addr val = _addr2pvar_ini space addr (Right val)
+addr2pvar_new space addr = addr2pvar_ini space addr . RDV
 {-# INLINE addr2pvar_new #-}
 
-_addr2pvar_ini :: (VCacheable a) => VSpace -> Address -> RDV a -> IO (PVar a)
-_addr2pvar_ini space addr ini =
+addr2pvar_ini :: (VCacheable a) => VSpace -> Address -> RDV a -> IO (PVar a)
+addr2pvar_ini space addr ini =
     if not (isPVarAddr addr) then fail ("invalid PVar address " ++ show addr) else
     loadPVarData undefined space addr ini >>= \ pvdata ->
     return $! PVar
@@ -122,7 +117,7 @@ _addr2pvar_ini space addr ini =
         , pvar_space = space
         , pvar_write = put
         }
-{-# INLINABLE _addr2pvar_ini #-}
+{-# INLINABLE addr2pvar_ini #-}
 
 loadPVarData :: (Typeable a) => a -> VSpace -> Address -> RDV a -> IO (TVar (RDV a))
 loadPVarData _dummy space addr ini = atomicModifyIORef pvtbl loadData where

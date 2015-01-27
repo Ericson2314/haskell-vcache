@@ -5,7 +5,7 @@ module Database.VCache.Types
     ( Address, isVRefAddr, isPVarAddr
     , VRef(..), Cache(..), CacheMode(..)
     , Eph(..), EphMap 
-    , PVar(..), RDV
+    , PVar(..), RDV(..)
     , PVEph(..), PVEphMap
     , VTx(..), VTxState(..), TxW(..), VTxBatch(..)
     , VCache(..), VSpace(..), VCacheStats(..)
@@ -20,10 +20,9 @@ module Database.VCache.Types
     , withByteStringVal
     , getVTxSpace
     , markForWrite
-    , markDurableTransaction
     , liftSTM
 
-    , mkVRefCache
+    , mkVRefCache, cacheWeight
     ) where
 
 import Data.Bits
@@ -141,10 +140,9 @@ data CacheMode
 --      touch counter (value 0..511) for timeout
 --      reset to zero on every deref 
 
--- | mkVRefCache val nBytes nDeps 
-mkVRefCache :: a -> Int -> Int -> CacheMode -> Cache a
-mkVRefCache val nBytes nDeps cm = Cached val cw where
-    w = nBytes + 80 * (nDeps + 1)
+-- | mkVRefCache val weight
+mkVRefCache :: a -> Int -> CacheMode -> Cache a
+mkVRefCache val w cm = Cached val cw where
     cw = m .|. cs 0 256
     cs r k = if ((k > w) || (r > 30)) then r else cs (r+1) (k*2)
     m = case cm of
@@ -153,15 +151,20 @@ mkVRefCache val nBytes nDeps cm = Cached val cw where
             CacheMode2 -> 2 `shiftL` 5
             CacheMode3 -> 3 `shiftL` 5
 
+-- | cacheWeight nBytes nDeps
+cacheWeight :: Int -> Int -> Int
+cacheWeight nBytes nDeps = nBytes + (80 * (nDeps + 1))
+
 -- | A PVar is a mutable variable backed by VCache. PVars can be read
 -- or updated transactionally (see VTx), and may store by reference
 -- as part of domain data (see VCacheable). PVars are often anonymous,
 -- though named root PVars provide a basis for persistence.
 --
--- PVar contents are locked into Haskell memory after the first read,
--- though may be released (and later reloaded, e.g. via loadRootPVar)
--- if the PVar itself is fully GC'd from the Haskell layer. Use PVars
--- containing VRefs for very large domain models.
+-- When loaded from disk, PVar contents are lazily read into Haskell
+-- memory when first needed. PVar contents are not cached; the only
+-- way to release content associated with the PVar is to allow all
+-- instances of the PVar be GC'd from the Haskell layer, after which
+-- the PVar might again be lazily loaded.
 --
 -- Programmers must be careful with regards to cyclic references among
 -- PVars. The VCache garbage collector uses reference counting, which
@@ -186,11 +189,10 @@ data PVEph = forall a . PVEph
     } 
 type PVEphMap = IntMap [PVEph]
 
--- thoughts: It might be useful to eventually support 'Weak' PVars.
---   However, I'll leave this off for now.
-
--- Left iff not read.
-type RDV a = Either (VGet a) a
+-- I need some way to force an evaluation when a PVar is first
+-- read, i.e. in order to load the initial value, without forcing
+-- on every read. For the moment, I'm using a simple type wrapper.
+data RDV a = RDV a
 
 
 -- | VCache supports a filesystem-backed address space plus a set of
@@ -254,7 +256,7 @@ data VSpace = VSpace
 
     }
 
-instance Eq VSpace where (==) = (==) `on` vcache_lockfile
+instance Eq VSpace where (==) = (==) `on` vcache_signal
 
 -- needed: a transactional queue of updates to PVars
 
@@ -525,12 +527,6 @@ markForWrite pvar = VTx $ modify $ \ vtx ->
     let writes' = (TxW pvar) : vtx_writes vtx in
     vtx { vtx_writes = writes' }
 {-# INLINE markForWrite #-}
-
-markDurableTransaction :: VTx ()
-markDurableTransaction = VTx $ modify $ \ vtx -> 
-    vtx { vtx_durable = True }
-{-# INLINE markDurableTransaction #-}
-
 
 type WriteLog  = [TxW]
 data TxW = forall a . TxW !(PVar a)

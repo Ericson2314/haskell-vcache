@@ -1,16 +1,17 @@
 
 
 module Database.VCache
-    ( VRef
-    , PVar
+    ( VRef, vref, vref', deref, deref'
+    , PVar, newPVar, newPVarIO, readPVar, writePVar
+    , VTx, runVTx, liftSTM, markDurable
     , VCache, openVCache
+    , loadRootPVar, loadRootPVarIO
+    , vcacheSubdir, vcacheSubdirM
+    , vcacheStats, vcacheSync
     , VSpace, vcache_space, vref_space, pvar_space
+    , unsafeVRefAddr
+    , unsafePVarAddr
     , module Database.VCache.VCacheable
-    , module Database.VCache.Stats
-    , module Database.VCache.Path
-    , module Database.VCache.Sync
-
-    -- * Utility
     ) where
 
 import Database.VCache.Types 
@@ -19,3 +20,6 @@ import Database.VCache.Open
 import Database.VCache.Stats
 import Database.VCache.Path
 import Database.VCache.Sync
+import Database.VCache.VRef
+import Database.VCache.PVar
+import Database.VCache.VTx

@@ -67,11 +67,11 @@ Library
     Database.VCache.VCacheable
     Database.VCache.VPut
     Database.VCache.VGet
+
+  Other-Modules:
     Database.VCache.Stats
     Database.VCache.Path
     Database.VCache.Sync
-
-  Other-Modules:
     Database.VCache.Types
     Database.VCache.Open
     Database.VCache.Aligned
@@ -81,6 +81,10 @@ Library
     Database.VCache.VPutFini
     Database.VCache.FromAddr
     Database.VCache.Alloc
+    Database.VCache.PVar
+    Database.VCache.VRef
+    Database.VCache.VTx
+    Database.VCache.Read
    
   ghc-options: -Wall -auto-all
 
