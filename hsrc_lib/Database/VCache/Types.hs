@@ -99,6 +99,7 @@ data VRef a = VRef
     , vref_parse  :: !(VGet a)                          -- ^ parser for this VRef
     } deriving (Typeable)
 instance Eq (VRef a) where (==) = (==) `on` vref_cache
+instance Show (VRef a) where showsPrec _ v = showString "VRef#" . shows (vref_addr v)
 
 -- For every VRef we have in memory, we need an ephemeron in a table.
 -- This ephemeron table supports structure sharing, caching, and GC.
@@ -180,6 +181,7 @@ data PVar a = PVar
     , pvar_space :: !VSpace -- ^ virtual address space for PVar
     } deriving (Typeable)
 instance Eq (PVar a) where (==) = (==) `on` pvar_data
+instance Show (PVar a) where showsPrec _ pv = showString "PVar#" . shows (pvar_addr pv)
 
 -- ephemeron table for PVars.
 data PVEph = forall a . PVEph

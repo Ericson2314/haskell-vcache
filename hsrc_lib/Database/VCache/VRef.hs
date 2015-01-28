@@ -42,6 +42,9 @@ readVRef v = readAddrIO (vref_space v) (vref_addr v) (vref_parse v)
 -- | Dereference a VRef, obtaining its value. If the value is not in
 -- cache, it will be read into the database then cached. Otherwise, 
 -- the value is read from cache and any expiration timer is reset.
+--
+-- Assuming a valid VCacheable instance, this operation should return
+-- an equivalent value as used to construct the VRef.
 deref :: VRef a -> a
 deref v = unsafePerformIO $
     unsafeInterleaveIO (readVRef v) >>= \ lazy_read_rw ->
