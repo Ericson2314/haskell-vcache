@@ -85,6 +85,7 @@ Library
     Database.VCache.VRef
     Database.VCache.VTx
     Database.VCache.Read
+    Database.VCache.Write
     Database.VCache.VGetAux
    
   ghc-options: -Wall -auto-all
