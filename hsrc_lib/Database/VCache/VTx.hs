@@ -29,13 +29,14 @@ runVTx vc action = do
 
 -- | A VTx transaction is Atomic, Consistent, and Isolated. Durability
 -- is optional, and requires an additional wait for a background writer
--- thread to signal that contents read or written are consistent with 
+-- thread to signal that contents written and read are consistent with 
 -- the persistence layer. 
 --
--- Durability is indicated within the transaction. This allows domain
--- layer decisions about whether a transaction should be durable. E.g.
--- we might mark a transaction durable when committing to a purchase,
+-- The decision to mark a transaction durable is at the domain layer.
+-- Developers may decide based on the specific variables and values
+-- involved, e.g. marking durability when committing to a purchase,
 -- but not for merely updating the shopping cart.
+--
 markDurable :: VTx ()
 markDurable = VTx $ modify $ \ vtx -> 
     vtx { vtx_durable = True }

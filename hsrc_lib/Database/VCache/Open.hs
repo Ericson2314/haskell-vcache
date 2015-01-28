@@ -68,14 +68,14 @@ openVCache nMB fp = do
 
 vcFlags :: [MDB_EnvFlag] 
 vcFlags = [MDB_NOSUBDIR     -- open file name, not directory name
-          ,MDB_NOSYNC       -- we'll sync via separate thread
           ,MDB_NOLOCK       -- leave lock management to VCache
+          ,MDB_NOSYNC       -- explicitly manage synchronization
           ]
 
 -- I'm providing a non-empty root bytestring because it allows
--- me some arbitrary namespaces for VCache, if I ever choose to
--- use them. Also, I will use the empty bytestring to indicate
--- anonymous PVars when it comes up (e.g. in Allocation).
+-- me some arbitrary namespaces for VCache internal use, if I
+-- ever feel the need to use them. Also, I will use the empty
+-- bytestring to indicate anonymous PVars in the Allocation type.
 --
 -- The maximum path, including the PVar name, is 511 bytes. That
 -- should be enough for almost any use case.
