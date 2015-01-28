@@ -132,14 +132,10 @@ data CacheMode
 --   bit 0..4: heuristic weight, log scale
 --     weight = bytes + 80 * (deps + 1)
 --     log scale: 2^(N+8), max N=31
---   bits 5..6: timeout
---      0 -> 8   (less than one second)
---      1 -> 32
---      2 -> 128
---      3 -> 511 (almost a minute)
---   bits 7..15:
---      touch counter (value 0..511) for timeout
---      reset to zero on every deref 
+--   bits 5..6: timeout heuristic (log scale)
+--   bit 7: marked 0 on each deref.
+--   bits 8..15: for internal use by GC (e.g. timers).
+--
 
 -- | mkVRefCache val weight
 mkVRefCache :: a -> Int -> CacheMode -> Cache a

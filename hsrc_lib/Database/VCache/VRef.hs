@@ -46,11 +46,13 @@ readVRef v = readAddrIO (vref_space v) (vref_addr v) (vref_parse v)
 -- Assuming a valid VCacheable instance, this operation should return
 -- an equivalent value as used to construct the VRef.
 deref :: VRef a -> a
-deref v = unsafePerformIO $
+deref v = unsafeDupablePerformIO $
     unsafeInterleaveIO (readVRef v) >>= \ lazy_read_rw ->
     atomicModifyIORef (vref_cache v) $ \ c -> case c of
         Cached r w -> 
-            let c' = Cached r (w .&. 0x7f) in 
+            -- clear bit 7: signal GC of cache use
+            let w' = w .&. complement 0x80 in
+            let c' = Cached r w' in 
             c' `seq` (c',r)
         NotCached ->
             let (r,w) = lazy_read_rw in

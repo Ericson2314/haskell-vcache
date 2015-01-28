@@ -61,7 +61,7 @@ openVCache nMB fp = do
     case mbLock of
         Nothing -> ioError $ IOE.mkIOError
             IOE.alreadyInUseErrorType
-            "failure to acquire exclusive file lock"
+            "openVCache lockfile"
             Nothing (Just fpLock)
         Just fl -> openVC' nBytes fl fp 
                     `onException` FileLock.unlockFile fl
