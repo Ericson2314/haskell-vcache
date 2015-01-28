@@ -32,8 +32,11 @@ writePVar pvar v =
 
 -- | Each PVar has a stable address in the VCache. This address will
 -- be very stable, but is not deterministic and isn't really something
--- you should use as information about the PVar. Mostly, it is supported
--- here to enable hashtables or memoization tables involving PVars.
+-- you should treat as meaningful information about the PVar. Mostly, 
+-- this function exists to support hashtables or memoization with
+-- PVar keys.
+--
+-- The Show instance for PVars will also show the address.
 unsafePVarAddr :: PVar a -> Address
 unsafePVarAddr = pvar_addr
 

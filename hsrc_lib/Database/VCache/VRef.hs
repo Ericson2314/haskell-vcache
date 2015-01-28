@@ -76,6 +76,8 @@ deref' v = unsafePerformIO $
 -- be stable so long as the developer can guarantee it is reachable.
 --
 -- This function may be useful for memoization tables and similar.
+--
+-- The 'Show' instance for VRef will also show the address.
 unsafeVRefAddr :: VRef a -> Address
 unsafeVRefAddr = vref_addr
 
