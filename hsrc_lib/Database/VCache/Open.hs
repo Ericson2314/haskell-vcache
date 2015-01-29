@@ -55,6 +55,10 @@ import Database.VCache.Write
 -- background GC and writer threads. Assume that, once you've opened 
 -- a VCache instance, you're stuck with it.
 --
+-- Note: If errors cause the VCache threads to halt prematurely, the
+-- whole program will halt. This prevents database corruption and
+-- limits wasted effort writing to PVars that cannot be persisted.
+--
 openVCache :: Int -> FilePath -> IO VCache
 openVCache nMB fp = do
     let (fdir,fn) = EasyFile.splitFileName fp
@@ -126,7 +130,10 @@ openVC' nBytes fl fp = do
         -- Realistically, we're unlikely GC our VCache before the
         -- process halts. But this should provide some graceful
         -- shutdown behavior.
-        let closeVC = withRWLock rwLock $ mdb_env_close dbEnv >> FileLock.unlockFile fl
+        let closeVC = withRWLock rwLock $ do
+                mdb_env_sync_flush dbEnv
+                mdb_env_close dbEnv
+                FileLock.unlockFile fl
         _ <- mkWeakMVar mvSignal closeVC
 
         let vc = VCache 

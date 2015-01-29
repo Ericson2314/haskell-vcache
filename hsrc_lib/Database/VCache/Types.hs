@@ -165,12 +165,20 @@ cacheWeight nBytes nDeps = nBytes + (80 * (nDeps + 1))
 -- instances of the PVar be GC'd from the Haskell layer, after which
 -- the PVar might again be lazily loaded.
 --
+-- It is not the case that every write to a PVar results in a write to
+-- disk: if a PVar is updated at a higher frequency than the writer
+-- thread, many intermediate values will be skipped. High frequency or
+-- bursty updates are not a significant performance concern.
+--
 -- Programmers must be careful with regards to cyclic references among
 -- PVars. The VCache garbage collector uses reference counting, which
 -- scales nicely but will leak cyclic data structures. Cycles are not
 -- forbidden. But programmers that use cycles must be careful to break
 -- cycles when done with them. Cycles should always be reachable from
 -- named root PVars, otherwise they will leak upon crash.
+--
+-- Note: PVars should never contain undefined or error values, or any
+-- value that cannot be strictly serialized by a VCacheable instance.
 --
 data PVar a = PVar
     { pvar_addr  :: {-# UNPACK #-} !Address
@@ -351,14 +359,13 @@ withByteStringVal (BSI.PS fp off len) action = withForeignPtr fp $ \ p ->
 -- frequency of PVar updates vs. LMDB layer writes, not alignment).
 -- 
 data WBatch = WBatch
-    { wb_list :: [WBI]
-    , wb_sync :: [MVar ()]
+    { wb_list :: ![WBI]
+    , wb_sync :: ![MVar ()]
     }
 data WBI = WBI 
     { wbi_addr :: {-# UNPACK #-} !Address -- from write log
     , wbi_data :: {-# UNPACK #-} !ByteString -- from runVPutIO
     , wbi_deps :: ![PutChild] -- prevent GC
-    , wbi_orig :: !TxW -- prevent GC 
     }
 
 --
