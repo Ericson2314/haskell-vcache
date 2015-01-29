@@ -2,13 +2,12 @@ module Database.VCache.Open
     ( openVCache
     ) where
 
+import Control.Monad
 import Control.Exception
 import System.FileLock (FileLock)
 import qualified System.FileLock as FileLock
-import qualified System.FilePath as FP
 import qualified System.EasyFile as EasyFile
 import qualified System.IO.Error as IOE
-
 import Foreign.Storable
 import Foreign.Marshal.Alloc
 import Foreign.Ptr
@@ -18,6 +17,7 @@ import Data.IORef
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import qualified Data.ByteString as BS
+import qualified Data.List as L
 import Control.Concurrent.MVar
 import Control.Concurrent.STM.TVar
 
@@ -25,6 +25,7 @@ import Database.LMDB.Raw
 import Database.VCache.Types 
 import Database.VCache.RWLock
 import Database.VCache.Aligned
+import Database.VCache.Write
 
 
 -- | Open a VCache with a given database file. 
@@ -45,16 +46,21 @@ import Database.VCache.Aligned
 --
 -- In addition to the file location, developers must choose a maximum 
 -- database size in megabytes. This determines how much address space 
--- is requested, and the maximum file size. On one 64-bit Ubuntu system,
--- the limit was to open for 127TB (despite 120GB disk and 8GB RAM). 
--- But you may want to reserve some address space for other purposes.
+-- is memory mapped, and the maximum file size. Depending on your app,
+-- you may need to reserve some address space for other resources or
+-- databases. Note: Some 64-bit CPUs limit you to 48 bits address, so
+-- you might be limited to allocating ~127 terabytes.
 --
--- VCache will generally remain in memory after it opens. A few background
--- threads may keep it alive for a very long time.
+-- VCache will generally remain in memory after it opens, i.e. due to
+-- background GC and writer threads. Assume that, once you've opened 
+-- a VCache instance, you're stuck with it.
 --
 openVCache :: Int -> FilePath -> IO VCache
 openVCache nMB fp = do
-    EasyFile.createDirectoryIfMissing True (FP.takeDirectory fp)
+    let (fdir,fn) = EasyFile.splitFileName fp
+    let eBadFile = fp ++ " not recognized as a file name"
+    when (L.null fn) (fail $ "openVCache: " ++ eBadFile)
+    EasyFile.createDirectoryIfMissing True fdir
     let fpLock = fp ++ "-lock"
     let nBytes = (max 1 nMB) * 1024 * 1024
     mbLock <- FileLock.tryLockFile fpLock FileLock.Exclusive 
@@ -113,35 +119,40 @@ openVC' nBytes fl fp = do
         memVRefs <- newIORef IntMap.empty
         memPVars <- newIORef IntMap.empty
         tvWrites <- newTVarIO (Writes Map.empty [])
-        mvSignal <- newMVar ()
+        tvWBatch <- newTVarIO Nothing
+        mvSignal <- newMVar () 
         rwLock <- newRWLock
 
-        -- todo: create all the background threads 
-
-        -- Realistically, we're unlikely to ever GC our VCache due
-        -- to background threads. But, if it does happen, we should
-        -- close the MDB environment and release the lockfile.
-        let closeVC = mdb_env_close dbEnv >> FileLock.unlockFile fl
+        -- Realistically, we're unlikely GC our VCache before the
+        -- process halts. But this should provide some graceful
+        -- shutdown behavior.
+        let closeVC = withRWLock rwLock $ mdb_env_close dbEnv >> FileLock.unlockFile fl
         _ <- mkWeakMVar mvSignal closeVC
 
-        return $! VCache 
-            { vcache_path = vcRootPath
-            , vcache_space = VSpace 
-                { vcache_lockfile = fl
-                , vcache_db_env = dbEnv
-                , vcache_db_memory = dbiMemory
-                , vcache_db_vroots = dbiRoots
-                , vcache_db_caddrs = dbiHashes
-                , vcache_db_refcts = dbiRefct
-                , vcache_db_refct0 = dbiRefct0
-                , vcache_mem_vrefs = memVRefs
-                , vcache_mem_pvars = memPVars
-                , vcache_allocator = allocator
-                , vcache_signal = mvSignal
-                , vcache_writes = tvWrites
-                , vcache_rwlock = rwLock
+        let vc = VCache 
+                { vcache_path = vcRootPath
+                , vcache_space = VSpace 
+                    { vcache_lockfile = fl
+                    , vcache_db_env = dbEnv
+                    , vcache_db_memory = dbiMemory
+                    , vcache_db_vroots = dbiRoots
+                    , vcache_db_caddrs = dbiHashes
+                    , vcache_db_refcts = dbiRefct
+                    , vcache_db_refct0 = dbiRefct0
+                    , vcache_mem_vrefs = memVRefs
+                    , vcache_mem_pvars = memPVars
+                    , vcache_allocator = allocator
+                    , vcache_signal = mvSignal
+                    , vcache_writes = tvWrites
+                    , vcache_wbatch = tvWBatch
+                    , vcache_rwlock = rwLock
+                    }
                 }
-            }
+
+        -- Star the background writer threads. In addition to performing
+        -- writes, these threads must handle ongoing GC tasks.
+        initWriterThreads (vcache_space vc)
+        return $! vc
 
 -- our allocator should be set for the next *even* address.
 nextAllocAddress :: Address -> Address

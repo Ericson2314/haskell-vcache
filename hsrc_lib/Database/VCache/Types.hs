@@ -13,7 +13,7 @@ module Database.VCache.Types
     , VGet(..), VGetS(..), VGetR(..)
     , VCacheable(..)
     , Allocator(..), AllocFrame(..), Allocation(..)
-    , Writes(..), WriteLog
+    , Writes(..), WriteLog, WBatch(..), WBI(..)
 
     -- a few utilities
     , allocFrameSearch
@@ -226,7 +226,7 @@ data VCache = VCache
 -- can easily vary in size from one update to another.
 --
 data VSpace = VSpace
-    { vcache_lockfile   :: {-# UNPACK #-} !FileLock -- block concurrent use of VCache file
+    { vcache_lockfile   :: !FileLock -- block concurrent use of VCache file
 
     -- LMDB contents. 
     , vcache_db_env     :: !MDB_env
@@ -235,11 +235,12 @@ data VSpace = VSpace
     , vcache_db_caddrs  :: {-# UNPACK #-} !MDB_dbi' -- hashval → [address]
     , vcache_db_refcts  :: {-# UNPACK #-} !MDB_dbi' -- address → Word64
     , vcache_db_refct0  :: {-# UNPACK #-} !MDB_dbi' -- address → ()
-    , vcache_mem_vrefs  :: {-# UNPACK #-} !(IORef EphMap) -- track VRefs in memory
-    , vcache_mem_pvars  :: {-# UNPACK #-} !(IORef PVEphMap) -- track PVars in memory
-    , vcache_allocator  :: {-# UNPACK #-} !(IORef Allocator) -- allocate new VRefs and PVars
-    , vcache_signal     :: {-# UNPACK #-} !(MVar ()) -- signal writer that work is available
-    , vcache_writes     :: {-# UNPACK #-} !(TVar Writes) -- incoming transactional writes
+    , vcache_mem_vrefs  :: !(IORef EphMap) -- track VRefs in memory
+    , vcache_mem_pvars  :: !(IORef PVEphMap) -- track PVars in memory
+    , vcache_allocator  :: !(IORef Allocator) -- allocate new VRefs and PVars
+    , vcache_signal     :: !(MVar ()) -- signal writer that work is available
+    , vcache_writes     :: !(TVar Writes) -- STM layer PVar writes
+    , vcache_wbatch     :: !(TVar (Maybe WBatch)) -- LMDB layer writes 
     , vcache_rwlock     :: !RWLock -- replace gap left by MDB_NOLOCK
 
     -- requested weight limit for cached values
@@ -341,9 +342,24 @@ withByteStringVal (BSI.PS fp off len) action = withForeignPtr fp $ \ p ->
     action $ MDB_val { mv_size = fromIntegral len
                      , mv_data = p `plusPtr` off }
 {-# INLINE withByteStringVal #-}
-    
 
-
+-- | I use at least two writer threads. One reads 'vcache_writes' and
+-- turns it into a batch with a bunch of bytestrings. In parallel with
+-- computation of the next batch, a thread will be writing a previous
+-- batch to the LMDB layer. This overlap can reduce latencies a little,
+-- and should not affect the batch size (since that's based on relative
+-- frequency of PVar updates vs. LMDB layer writes, not alignment).
+-- 
+data WBatch = WBatch
+    { wb_list :: [WBI]
+    , wb_sync :: [MVar ()]
+    }
+data WBI = WBI 
+    { wbi_addr :: {-# UNPACK #-} !Address -- from write log
+    , wbi_data :: {-# UNPACK #-} !ByteString -- from runVPutIO
+    , wbi_deps :: ![PutChild] -- prevent GC
+    , wbi_orig :: !TxW -- prevent GC 
+    }
 
 --
 -- Two or Three writer threads?

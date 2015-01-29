@@ -60,7 +60,7 @@ Library
     , stm (>= 2.4.3)
     , lmdb (>= 0.2.5)
     , filelock
-    , filepath, easy-file
+    , easy-file
 
   Exposed-Modules:
     Database.VCache
