@@ -152,7 +152,7 @@ newPVar :: (VCacheable a) => a -> VTx (PVar a)
 newPVar ini = do
     vc <- getVTxSpace 
     pvar <- liftSTM $ unsafeIOToSTM $ newPVarVTxIO vc ini
-    markForWrite pvar
+    markForWrite pvar ini
     return pvar
 
 newPVarVTxIO :: (VCacheable a) => VSpace -> a -> IO (PVar a)

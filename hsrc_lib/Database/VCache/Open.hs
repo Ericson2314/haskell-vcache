@@ -112,7 +112,7 @@ openVC' nBytes fl fp = do
         allocator <- newIORef initAllocator
         memVRefs <- newIORef IntMap.empty
         memPVars <- newIORef IntMap.empty
-        tvWrites <- newTVarIO []
+        tvWrites <- newTVarIO (Writes Map.empty [])
         mvSignal <- newMVar ()
         rwLock <- newRWLock
 

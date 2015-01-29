@@ -18,17 +18,23 @@ import Database.VCache.Alloc (newPVar, newPVarIO, loadRootPVar, loadRootPVarIO)
 readPVar :: PVar a -> VTx a
 readPVar pvar = 
     getVTxSpace >>= \ space ->
-    if (space /= pvar_space pvar) then fail "readPVar: wrong VSpace" else
+    if (space /= pvar_space pvar) then fail eRead else
     liftSTM $ readTVar (pvar_data pvar) >>= \ rdv ->
               case rdv of { (RDV v) -> return v }
+
+eRead :: String
+eRead = "VTx: readPVar from wrong VSpace"
 
 -- | Write a PVar as part of a transaction.
 writePVar :: PVar a -> a -> VTx ()
 writePVar pvar v = 
     getVTxSpace >>= \ space ->
-    if (space /= pvar_space pvar) then fail "writePVar: wrong VSpace" else
-    markForWrite pvar >>
+    if (space /= pvar_space pvar) then fail eWrite else
+    markForWrite pvar v >>
     liftSTM (writeTVar (pvar_data pvar) (RDV v))
+
+eWrite :: String
+eWrite = "VTx: writePVar from wrong VSpace"
 
 -- | Each PVar has a stable address in the VCache. This address will
 -- be very stable, but is not deterministic and isn't really something

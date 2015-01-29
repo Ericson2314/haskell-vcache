@@ -13,6 +13,7 @@ module Database.VCache.Types
     , VGet(..), VGetS(..), VGetR(..)
     , VCacheable(..)
     , Allocator(..), AllocFrame(..), Allocation(..)
+    , Writes(..), WriteLog
 
     -- a few utilities
     , allocFrameSearch
@@ -32,6 +33,7 @@ import Data.Typeable
 import Data.IORef
 import Data.IntMap.Strict (IntMap)
 import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Internal as BSI
 import Control.Monad
@@ -40,7 +42,7 @@ import Control.Monad.STM (STM)
 import Control.Applicative
 import Control.Concurrent.MVar
 import Control.Concurrent.STM.TVar
-import Control.Monad.Trans.State
+import Control.Monad.Trans.State.Strict
 import Control.Exception (bracket)
 import System.Mem.Weak (Weak)
 import System.FileLock (FileLock)
@@ -237,7 +239,7 @@ data VSpace = VSpace
     , vcache_mem_pvars  :: {-# UNPACK #-} !(IORef PVEphMap) -- track PVars in memory
     , vcache_allocator  :: {-# UNPACK #-} !(IORef Allocator) -- allocate new VRefs and PVars
     , vcache_signal     :: {-# UNPACK #-} !(MVar ()) -- signal writer that work is available
-    , vcache_writes     :: {-# UNPACK #-} !(TVar [VTxBatch]) -- incoming transactional writes
+    , vcache_writes     :: {-# UNPACK #-} !(TVar Writes) -- incoming transactional writes
     , vcache_rwlock     :: !RWLock -- replace gap left by MDB_NOLOCK
 
     -- requested weight limit for cached values
@@ -324,7 +326,6 @@ allocFrameSearch f a = f n <|> f c <|> f p where
 
 -- thoughts: I may need an additional allocations list for anonymous
 -- PVars, if only to support a `newPVarIO` or similar.
-
 
 -- simple read-only operations 
 --  LMDB transaction is aborted when finished, so cannot open DBIs
@@ -520,18 +521,43 @@ getVTxSpace :: VTx VSpace
 getVTxSpace = VTx (gets vtx_space)
 {-# INLINE getVTxSpace #-}
 
-markForWrite :: PVar a -> VTx ()
-markForWrite pvar = VTx $ modify $ \ vtx ->
-    let writes' = (TxW pvar) : vtx_writes vtx in
+-- | add a PVar write to the VTxState.
+-- (Does not modify the underlying TVar.)
+markForWrite :: PVar a -> a -> VTx ()
+markForWrite pv a = VTx $ modify $ \ vtx ->
+    let txw = TxW pv a in
+    let addr = pvar_addr pv in
+    let writes' = Map.insert addr txw (vtx_writes vtx) in
     vtx { vtx_writes = writes' }
 {-# INLINE markForWrite #-}
 
-type WriteLog  = [TxW]
-data TxW = forall a . TxW !(PVar a)
-    -- note: PVars should not be GC'd before written to disk. An
-    -- alternative is that `loadPVar` waits on active writes, or
-    -- accesses the global write log. But it's easiest to simply
-    -- not GC until finished writing.
+type WriteLog  = Map Address TxW
+data TxW = forall a . TxW !(PVar a) a
+data Writes = Writes 
+    { write_data :: !WriteLog
+    , write_sync :: ![MVar ()]
+    }
+
+-- Note on TxW: I have two options here. Either I can record just
+-- the PVar to which I write, then read the PVar in the writer 
+-- thread later on, or I can record both the PVar and the value
+-- written, and keep the most recent instance for each write based
+-- on transaction serialization.
+--
+-- In the normal case, both should be about the same. But I think,
+-- in the worst case scenario, the first option might have unstable
+-- emergent behavior: if we're asked to write 40000 variables, we 
+-- must first try to read them; if the transaction fails because
+-- some have changed, then we'll need to read all of them again,
+-- and maybe a few more. The second option, meanwhile, requires 
+-- reading only one variable in the writer thread no matter what.
+--
+-- So for now, I'm keeping the value written redundantly in the
+-- TxW so that I don't need to read the PVars in the writer thread.
+--
+-- I'm also holding onto the PVars, not just the addresses, because
+-- it is useful to guarantee against garbage collection.
+
 data VTxBatch = VTxBatch SyncOp WriteLog 
 type SyncOp = IO () -- called after write is synchronized.
 
