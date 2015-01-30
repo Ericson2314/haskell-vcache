@@ -18,12 +18,10 @@ import Database.VCache.Types
 runVTx :: VSpace -> VTx a -> IO a
 runVTx vc action = do
     mvWait <- newEmptyMVar
-    (bDurable, result) <- atomically (runVTx' vc mvWait action)
-    when bDurable (takeMVar mvWait)
-    return result
+    join (atomically (runVTx' vc mvWait action))
 {-# INLINABLE runVTx #-}
 
-runVTx' :: VSpace -> MVar () -> VTx a -> STM (Bool, a)
+runVTx' :: VSpace -> MVar () -> VTx a -> STM (IO a)
 runVTx' vc mvWait action = 
     let s0 = VTxState vc Map.empty False in
     runStateT (_vtx action) s0 >>= \ (r,s) ->
@@ -31,26 +29,32 @@ runVTx' vc mvWait action =
     let bWrite = not (Map.null (vtx_writes s)) in
     let bSync = vtx_durable s in
     let bDone = not (bWrite || bSync) in
-    if bDone then return (False, r) else
+    if bDone then return (return r) else
     -- otherwise, we must update the shared queue
     readTVar (vcache_writes vc) >>= \ w ->
-    let d' = updateLog (vtx_writes s) (write_data w) in
-    let s' = mvWait : write_sync w in
-    let w' = Writes { write_data = d', write_sync = s' } in
-    writeTVar (vcache_writes vc) w' >>
-    return (w' `seq` bSync, r)
-{-# NOINLINE runVTx' #-} 
+    let wdata' = updateLog (vtx_writes s) (write_data w) in
+    let wsync' = updateSync bSync mvWait (write_sync w) in
+    let w' = Writes { write_data = wdata', write_sync = wsync' } in
+    writeTVar (vcache_writes vc) w' >>= \ () ->
+    return $ w' `seq` do
+        signalWriter vc
+        when bSync (takeMVar mvWait)
+        return r
 
--- I assume the log is larger than recent updates.
--- This will usually be true after a few transactions.
--- Data.Map hedge union favors the big set on the left.
--- For performance, I want a right-biased hedge union.
+-- signal the writer thread of new work to do
+signalWriter :: VSpace -> IO ()
+signalWriter vc = void (tryPutMVar (vcache_signal vc) ())
+{-# INLINE signalWriter #-}
+
+-- keep the most recent writes for each PVar, allowing older
+-- data to be GC'd.
 updateLog :: WriteLog -> WriteLog -> WriteLog
-updateLog updates writeLog = Map.unionWith rightBias writeLog updates
+updateLog updates writeLog = Map.union updates writeLog 
 {-# INLINE updateLog #-}
 
-rightBias :: a -> b -> b
-rightBias _ b = b
+updateSync :: Bool -> MVar () -> [MVar ()] -> [MVar ()]
+updateSync bSync v = if bSync then (v:) else id
+{-# INLINE updateSync #-}
 
 -- | A VTx transaction is Atomic, Consistent, and Isolated. Durability
 -- is optional, and requires an additional wait for a background writer

@@ -233,7 +233,9 @@ matchCandidate vc txn vData vCandidateAddr = do
     mbR <- mdb_get' txn (vcache_db_memory vc) vCandidateAddr
     case mbR of
         Nothing -> -- this should not happen
-            fail "corrupt database: undefined address in hashmap"
+            peekAddr vCandidateAddr >>= \ addr ->
+            fail $ "VCache corrupt: undefined address " 
+                    ++ show addr ++ " in hashmap" 
         Just vData' ->
             let bSameSize = mv_size vData == mv_size vData' in
             if not bSameSize then return Nothing else
@@ -297,7 +299,7 @@ addToFrameS an hkey frm =
     let list' = Map.insert (alloc_addr an) an (alloc_list frm) in
     let add_an = Just . (an:) . maybe [] id in
     let seek' = IntMap.alter add_an hkey (alloc_seek frm) in
-    AllocFrame { alloc_list = list', alloc_seek = seek' }
+    frm { alloc_list = list', alloc_seek = seek' }
 
 -- report allocation to the writer threads
 signalAlloc :: VSpace -> IO ()

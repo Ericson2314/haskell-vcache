@@ -1,5 +1,6 @@
 
--- read-write lock specialized for using LMDB with MDB_NOLOCK option
+-- | read-write lock specialized for using LMDB with MDB_NOLOCK option
+--
 module Database.VCache.RWLock
     ( RWLock
     , newRWLock
@@ -14,25 +15,30 @@ import Data.IORef
 import Data.IntSet (IntSet)
 import qualified Data.IntSet as IntSet
 
+--
+-- NOTE: I assumed earlier, based on discussion with LMDB developers on 
+-- the OpenLDAP list, that LMDB supports triple buffering (preserving 
+-- two snapshots). This turns out to be wrong, so I need to tweak it.
+-- However, I'm looking into tweaking LMDB fit the assumptions of the
+-- developers. I can later modify this to be version-adaptive.
+bUseSingleBuffer :: Bool
+bUseSingleBuffer = True
 
 -- | RWLock
 --
 -- VCache uses LMDB with the MDB_NOLOCK option, mostly because I don't
 -- want to deal with the whole issue of OS bound threads or a limit on
--- number of concurrent readers. Without locks, we essentially have 
--- frame buffer concurrency with three frames. LMDB directly preserves
--- the most recent two frames.
+-- number of concurrent readers. Without locks, we essentially have one
+-- valid snapshot. The writer can begin dismantling earlier snapshots
+-- as needed to allocate pages. 
 --
 -- RWLock essentially enforces this sort of frame-buffer concurrency.
--- A writer will wait for older readers, but not for readers of the 
--- most recent frame. Assuming short-lived readers, this should exhibit
--- a suitably high degree of parallelism.
 data RWLock = RWLock 
     { rwlock_frames :: !(MVar FB)
     , rwlock_writer :: !(MVar ())  -- enforce single writer
     }
 
-data FB = FB !F !F  -- frame buffer
+data FB = FB !F !F
 type F = IORef Frame
 data Frame = Frame 
     { frame_reader_next :: {-# UNPACK #-} !Int
@@ -70,12 +76,25 @@ withRWLock l action = withWriterMutex l $ do
 -- rotate a fresh reader frame, and grab the oldest.
 -- Thus should only be performed while holding the writer lock.
 rotateReaderFrames :: RWLock -> IO F
+
+rotateReaderFrames l | bUseSingleBuffer = mask_ $ do
+    let var = rwlock_frames l
+    f0 <- newF
+    (FB f1 fUnused) <- takeMVar var
+    putMVar var (FB f0 fUnused)
+    return f1
+
 rotateReaderFrames l = mask_ $ do
     let var = rwlock_frames l
     f0 <- newF
     (FB f1 f2) <- takeMVar var
     putMVar var (FB f0 f1)
     return f2
+
+-- 
+-- Unfortunately, each writer fr
+--   a writer at frame N can tolerate readers at frame N-1 but not
+--   readers at frame N-2. 
 
 --
 -- NOTE: Each of these 'frames' actually contains content for
@@ -85,6 +104,22 @@ rotateReaderFrames l = mask_ $ do
 -- Each writer will rotate the frames just once. 
 --
 --     (f1,f2) → (f0,f1) returning f2
+--
+-- Writer is working on frame N.
+--
+-- f0 will have readers for frame N-1 and later for N.
+-- f1 will have readers for frame N-2 and some for N-1.
+-- f2 will have readers for frame N-3 and some for N-2.
+--
+-- After writer commits frame N, writer soon begins next frame. So,
+-- there isn't much of a window for frame f0 to receive readers on
+-- frame N. However, since this RWLock is not precisely aligned with
+-- writer transactions, we should assume some overlap.
+--
+-- According to discussion on the OpenLDAP list, LMDB keeps two frames
+-- valid at all times. The writer for frame N, thus, cannot invalidate
+-- the content for frames N-1 or N-2, but can overwrite content from
+-- frame N-3. 
 --
 -- After rotate, f0 begins receiving readers for the current frame,
 -- and will eventually receive content for the next frame after the

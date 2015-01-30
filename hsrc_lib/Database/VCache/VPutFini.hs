@@ -60,7 +60,7 @@ listChildren = VPut $ \ s ->
 putChildren :: [PutChild] -> VPut ()
 putChildren [] = return ()
 putChildren (x:xs) = 
-    let addr0 = addressOf x in
+    let addr0 = putChildAddr x in
     putVarNat (fromIntegral addr0) >>
     putChildren' addr0 xs
 
@@ -68,14 +68,11 @@ putChildren (x:xs) =
 putChildren' :: Address -> [PutChild] -> VPut ()
 putChildren' _ [] = return ()
 putChildren' prev (x:xs) = 
-    let addrX = addressOf x in
+    let addrX = putChildAddr x in
     let offset = (fromIntegral addrX) - (fromIntegral prev) in
     putVarInt offset >>
     putChildren' addrX xs
 
-addressOf :: PutChild -> Address
-addressOf (PutChild (Left (PVar { pvar_addr = x }))) = x
-addressOf (PutChild (Right (VRef { vref_addr = x }))) = x
 
 -- write a varNat, but reversed (little-endian)
 putVarNatR :: Int -> VPut ()

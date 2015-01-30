@@ -9,11 +9,12 @@ module Database.VCache.Types
     , PVEph(..), PVEphMap
     , VTx(..), VTxState(..), TxW(..), VTxBatch(..)
     , VCache(..), VSpace(..), VCacheStats(..)
-    , VPut(..), VPutS(..), VPutR(..), PutChild(..)
+    , VPut(..), VPutS(..), VPutR(..)
+    , PutChild(..), putChildAddr
     , VGet(..), VGetS(..), VGetR(..)
     , VCacheable(..)
     , Allocator(..), AllocFrame(..), Allocation(..)
-    , Writes(..), WriteLog, WBatch(..), WBI(..)
+    , Writes(..), WriteLog
 
     -- a few utilities
     , allocFrameSearch
@@ -167,8 +168,8 @@ cacheWeight nBytes nDeps = nBytes + (80 * (nDeps + 1))
 --
 -- It is not the case that every write to a PVar results in a write to
 -- disk: if a PVar is updated at a higher frequency than the writer
--- thread, many intermediate values will be skipped. High frequency or
--- bursty updates are not a significant performance concern.
+-- thread processes the updates, intermediate values will be skipped. 
+-- High frequency or bursty updates are not a big performance concern.
 --
 -- Programmers must be careful with regards to cyclic references among
 -- PVars. The VCache garbage collector uses reference counting, which
@@ -201,7 +202,6 @@ type PVEphMap = IntMap [PVEph]
 -- read, i.e. in order to load the initial value, without forcing
 -- on every read. For the moment, I'm using a simple type wrapper.
 data RDV a = RDV a
-
 
 -- | VCache supports a filesystem-backed address space plus a set of
 -- persistent, named root variables that can be loaded from one run 
@@ -248,7 +248,6 @@ data VSpace = VSpace
     , vcache_allocator  :: !(IORef Allocator) -- allocate new VRefs and PVars
     , vcache_signal     :: !(MVar ()) -- signal writer that work is available
     , vcache_writes     :: !(TVar Writes) -- STM layer PVar writes
-    , vcache_wbatch     :: !(TVar (Maybe WBatch)) -- LMDB layer writes 
     , vcache_rwlock     :: !RWLock -- replace gap left by MDB_NOLOCK
 
     -- requested weight limit for cached values
@@ -309,7 +308,6 @@ instance Eq VSpace where (==) = (==) `on` vcache_signal
 --
 data Allocator = Allocator
     { alloc_new_addr :: {-# UNPACK #-} !Address -- next address
-    , alloc_old_addr :: {-# UNPACK #-} !Address -- address from older frames
     , alloc_frm_next :: !AllocFrame -- frame N+1 (next step)
     , alloc_frm_curr :: !AllocFrame -- frame N   (curr step)
     , alloc_frm_prev :: !AllocFrame -- frame N-1 (prev step)
@@ -318,6 +316,7 @@ data Allocator = Allocator
 data AllocFrame = AllocFrame 
     { alloc_list :: !(Map Address Allocation) -- allocated addresses
     , alloc_seek :: !(IntMap [Allocation])    -- hash map (for roots and VRefs)
+    , alloc_init :: {-# UNPACK #-} !Address   -- alloc_new_addr at frame init.
     }
 
 data Allocation = Allocation
@@ -351,138 +350,6 @@ withByteStringVal (BSI.PS fp off len) action = withForeignPtr fp $ \ p ->
                      , mv_data = p `plusPtr` off }
 {-# INLINE withByteStringVal #-}
 
--- | I use at least two writer threads. One reads 'vcache_writes' and
--- turns it into a batch with a bunch of bytestrings. In parallel with
--- computation of the next batch, a thread will be writing a previous
--- batch to the LMDB layer. This overlap can reduce latencies a little,
--- and should not affect the batch size (since that's based on relative
--- frequency of PVar updates vs. LMDB layer writes, not alignment).
--- 
-data WBatch = WBatch
-    { wb_list :: ![WBI]
-    , wb_sync :: ![MVar ()]
-    }
-data WBI = WBI 
-    { wbi_addr :: {-# UNPACK #-} !Address -- from write log
-    , wbi_data :: {-# UNPACK #-} !ByteString -- from runVPutIO
-    , wbi_deps :: ![PutChild] -- prevent GC
-    }
-
---
--- Two or Three writer threads?
--- 
--- For incoming writes, I want at least one writer thread performing
--- 'serialization' of content into clearly defined 'batches'. These
--- batches will then be written to LMDB. 
---
--- Serialization via background thread could help ensure all necessary
--- values are allocated before the batch finishes, and might also be an
--- effective basis for additional parallelism: multiple threads, or a 
--- small thread pool, working to evaluate and serialize large values. 
---
--- By limiting the serialization thread to work at most one batch 
--- ahead of the LMDB writer thread, we could probably achieve a fair
--- degree of bounded buffer pipeline parallelism, i.e. we're serializing
--- one batch concurrently with writing another to LMDB concurrently with
--- performing transactions on PVars in the background.
---
--- Finally, we might have the writer spin off a thread to perform an
--- mdb_sync after every write, in parallel with starting the next write.
--- This might result in a little extra work, but it won't delay further
--- updates and so on.
--- 
-
--- 
--- Behavior of the timer thread:
---   wait for a short period of time
---   writeIORef rfTick True
---   die (new timer thread created every transaction)
---
---   rfTick is used to help prevent latencies from growing
---   too large, especially when someone is waiting on a
---   synchronization. But it also enables combining many
---   transactions.
---
--- Behavior of the main writer thread:
---
---   wait for old readers 
---   create a write transaction
---   create a timer/tick thread
---   select the first unit of work
---   
-
--- Behavior of the forkOS thread:
---   create a transaction and a callback resource
---   wait on the callback to indicate time to commit
---   commit the transaction in same OS thread, start a new one (unless halted)
---   optional continuation action
---      start a new transaction
---      synchronize to disk
---      report synchronization to anyone waiting on it
-
---   if a tick has occurred
---     finish current transaction
---     start a new one
---   read the current queue of operations.
---   perform each operation in queue. 
---   aggregate anyone waiting for synch.
---   repeat.
---
-
-
-
--- DESIGN:
---   Using MDB_NOLOCK:
---     No need for a thread to handle the LMDB write mutex.
---
---     Instead, I need to track reader threads and prevent
---     writers from operating while readers exist for two
---     generations back. (Or was it three? Need to review
---     LMDB code.)
---
---     Thus: the writer waits on readers, but with double or
---     triple buffering for concurrency.
---
---  THREADS
---   
---   The writer thread should process a simple command stream
---   consisting primarily of writes.
---
---   Reader transactions may then be created as needed in Haskell
---   threads, mostly to deref values. 
---
---  VREF 
---
---   The 'vref' constructor must interact with the writer. I think
---   there are two options:
---
---     (a) the 'vref' constructor immediately creates a reader to
---         find a match, and only adds to the writer if the value
---         does not already exist. In this case, we already have:
---            the hash value (for content addressing)
---            the bytestring (to create the hash value)
---         we can formulate a 'collection' of writes-to-be-performed,
---     (b) the 'vref' constructor waits on the writer thread, which
---         must still perform a content-addressing hash before storing
---         the value.
---
---   Thus, either way I need a strict bytesting up to forming a hash 
---   value. Unless I'm going to hash just a fraction of the data, I 
---   should probably select (a).
---
---  PVARS
---
---   With PVars, it seems feasible to simply deliver a 'write batch' for
---   every transaction, with an optional sync request. Multiple batches
---   involving one PVar can be combined into a single write at the LMDB
---   layer. For consistency, I'll need to track what each transaction has
---   written to the PVar, rather than using a separate read on the PVars.
---
---   PVars will use STM variables under the hood, allowing interaction with
---   other STM variables at runtime. There is also no waiting on the write
---   thread unless the PVar transaction must be durable.
---
-
 -- | Miscellaneous statistics for a VCache instance. These can be 
 -- computed at runtime, though they aren't guaranteed to be atomic
 -- or consistent. 
@@ -515,11 +382,9 @@ data VCacheStats = VCacheStats
 -- intermediate values for rapidly updating PVars. Synchronization
 -- overheads will often be amortized among many transactions.
 -- 
--- Note: Unfortunately, VCache transactions do require updating a
--- shared TVar in the final step. This may hinder parallelism by
--- introducing conflicts between transactions. Developers should 
--- shift bulky computations outside of transactions to reduce the
--- probability and impact of conflicts.
+-- Note: Long-running VCache transactions can starve, restarting
+-- on a regular basis. Favor short transactions and try to delay
+-- expensive computations until after the transaction commits.
 -- 
 newtype VTx a = VTx { _vtx :: StateT VTxState STM a }
     deriving (Monad, Functor, Applicative, Alternative, MonadPlus)
@@ -609,6 +474,11 @@ data VPutS = VPutS
     --  reallocated many times during serialization of a large value,
     --  so we need easy access to the final value.
 data PutChild = forall a . PutChild (Either (PVar a) (VRef a))
+
+putChildAddr :: PutChild -> Address
+putChildAddr (PutChild (Left (PVar { pvar_addr = x }))) = x
+putChildAddr (PutChild (Right (VRef { vref_addr = x }))) = x
+
 
 data VPutR r = VPutR
     { vput_result :: r

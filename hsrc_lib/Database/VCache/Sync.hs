@@ -15,5 +15,5 @@ import Database.VCache.VTx
 -- It is recommended you perform a vcacheSync as part of graceful
 -- shutdown of any application that uses VCache.
 --
-vcacheSync :: VCache -> IO ()
-vcacheSync vc = runVTx (vcache_space vc) markDurable
+vcacheSync :: VSpace -> IO ()
+vcacheSync vc = runVTx vc markDurable

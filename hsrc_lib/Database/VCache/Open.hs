@@ -79,9 +79,9 @@ openVCache nMB fp = do
 vcFlags :: [MDB_EnvFlag] 
 vcFlags = [MDB_NOSUBDIR     -- open file name, not directory name
           ,MDB_NOLOCK       -- leave lock management to VCache
-          ,MDB_NOSYNC       -- explicitly manage synchronization
           ]
 
+--
 -- I'm providing a non-empty root bytestring because it allows
 -- me some arbitrary namespaces for VCache internal use, if I
 -- ever feel the need to use them. Also, I will use the empty
@@ -123,15 +123,13 @@ openVC' nBytes fl fp = do
         memVRefs <- newIORef IntMap.empty
         memPVars <- newIORef IntMap.empty
         tvWrites <- newTVarIO (Writes Map.empty [])
-        tvWBatch <- newTVarIO Nothing
         mvSignal <- newMVar () 
         rwLock <- newRWLock
 
         -- Realistically, we're unlikely GC our VCache before the
         -- process halts. But this should provide some graceful
         -- shutdown behavior.
-        let closeVC = withRWLock rwLock $ do
-                mdb_env_sync_flush dbEnv
+        let closeVC = do
                 mdb_env_close dbEnv
                 FileLock.unlockFile fl
         _ <- mkWeakMVar mvSignal closeVC
@@ -151,7 +149,6 @@ openVC' nBytes fl fp = do
                     , vcache_allocator = allocator
                     , vcache_signal = mvSignal
                     , vcache_writes = tvWrites
-                    , vcache_wbatch = tvWBatch
                     , vcache_rwlock = rwLock
                     }
                 }
@@ -181,6 +178,6 @@ findLastAddrAllocated txn dbiMemory = alloca $ \ pKey ->
 
 freshAllocator :: Address -> Allocator
 freshAllocator addr =
-    let f0 = AllocFrame Map.empty IntMap.empty in
-    Allocator addr (addr-1) f0 f0 f0
+    let f0 = AllocFrame Map.empty IntMap.empty addr in
+    Allocator addr f0 f0 f0
 
