@@ -83,7 +83,7 @@ rotateReaderFrames l = mask_ $ do
 --
 --     (f1,f2) → (f0,f1) returning f2
 --
--- Writer is working on frame N.
+-- Writer is working on LMDB frame N.
 --
 -- f0 will have readers for frame N-1 and (after commit) for N.
 -- f1 will have readers for frame N-2 and some for N-1.
@@ -138,9 +138,9 @@ addReader f =
     (f', r)
 
 delReader :: F -> Int -> IO ()
-delReader f r = atomicModifyIORef f del >>= id where
+delReader f r = atomicModifyIORef f del >>= sequence_ where
     del frm =
         let rdrs' = IntSet.delete r (frame_readers frm) in
-        if IntSet.null rdrs' then (frame0, sequence_ (frame_onClear frm)) else
+        if IntSet.null rdrs' then (frame0, frame_onClear frm) else
         let frm' = frm { frame_readers = rdrs' } in
-        (frm', return ()) 
+        (frm', []) 
