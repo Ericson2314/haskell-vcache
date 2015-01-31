@@ -51,13 +51,9 @@ import Database.VCache.Write
 -- databases. Note: Some 64-bit CPUs limit you to 48 bits address, so
 -- you might be limited to allocating ~127 terabytes.
 --
--- VCache will generally remain in memory after it opens, i.e. due to
--- background GC and writer threads. Assume that, once you've opened 
--- a VCache instance, you're stuck with it.
---
--- Note: If errors cause the VCache threads to halt prematurely, the
--- whole program will halt. This prevents database corruption and
--- limits wasted effort writing to PVars that cannot be persisted.
+-- Note: If errors cause the VCache writer threads to halt, VCache will
+-- halt the whole program rather than risk database corruption or wasted
+-- work. A likely source of error is storing error values in a PVar.
 --
 openVCache :: Int -> FilePath -> IO VCache
 openVCache nMB fp = do

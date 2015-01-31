@@ -16,6 +16,9 @@ import qualified Data.List as L
 import Data.Maybe
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Foreign.Ptr
+import Foreign.Storable
+import Foreign.Marshal.Alloc
 
 import qualified System.IO as Sys
 import qualified System.Exit as Sys
@@ -23,18 +26,13 @@ import qualified System.Exit as Sys
 import Database.LMDB.Raw
 import Database.VCache.Types
 import Database.VCache.VPutFini
+import Database.VCache.VGetInit
 import Database.VCache.RWLock
 
 -- a write batch records, for each address, both some content 
 -- and a list of addresses to incref
 type WriteBatch = Map Address WriteCell
 type WriteCell = (ByteString, [Address])
-
--- when processing write batches, we'll need to track
--- differences in reference counts for each address.
-type WithRefct = StateT RefCtDiff IO
-type RefCtDiff = Map Address Int
-
 
 -- How many threads?
 --
@@ -131,19 +129,27 @@ writerStep vc = withRWLock (vcache_rwlock vc) $ do
     wb <- batchWrites (write_data ws)
     af <- atomicModifyIORef (vcache_allocator vc) allocFrameStep
     let ab = Map.map fnWriteAlloc (alloc_list af) -- Map Address ByteString
-    let fullBatch = Map.union wb ab -- favor written data over allocations
-    let allocStart = alloc_init af
-    wtx <- mdb_txn_begin (vcache_db_env vc) Nothing False   -- write-only transaction to update memory and refct
-    rtx <- mdb_txn_begin (vcache_db_env vc) Nothing True    -- read-only transaction to read memory and refct
-    wmem <- mdb_cursor_open' wtx (vcache_db_memory vc)
-    rmem <- mdb_cursor_open' rtx (vcache_db_memory vc)
+    let fb = Map.union wb ab -- favor written data over allocations
+    let allocInit = alloc_init af 
+    wtx <- mdb_txn_begin (vcache_db_env vc) Nothing False  -- read-write 
+    rtx <- mdb_txn_begin (vcache_db_env vc) Nothing True   -- read-only
 
+    -- record the secondary index updates
+    writeSecondaryIndexes vc wtx (Map.elems (alloc_list af))
 
-    putStrLn "VCache: TODO: write stuff!"
+    -- update the reference counts
+    let rcInc = batchRefcts fb
+    rcDec <- readDeps vc rtx (L.takeWhile (< allocInit) $ Map.keys fb)
+    let rcDiff = Map.unionWith (-) rcInc rcDec
+    updateReferenceCounts vc wtx rtx rcDiff
 
+    -- update the virtual memory
+    updateVirtualMemory vc wtx (alloc_init af) fb
 
-    mdb_cursor_close' rmem
-    mdb_cursor_close' wmem
+    -- perform garbage collection
+    runGarbageCollector vc wtx rtx (alloc_init af)
+
+    -- finish up
     mdb_txn_abort  rtx
     mdb_txn_commit wtx
     mapM_ syncSignal (write_sync ws)
@@ -204,4 +210,88 @@ allocFrameStep ac =
 
 syncSignal :: MVar () -> IO ()
 syncSignal mv = void (tryPutMVar mv ())
+
+
+-- Write the PVar roots and VRef hashmap. In this case the order of 
+-- writes is effectively random and may be very widely scattered. I
+-- will not bother with cursors. This is only performed for fresh
+-- allocations, so there should never be any risk of overwrite.
+--
+-- This operation should never fail. If failure is detected, the 
+-- database has somehow been corrupted.
+writeSecondaryIndexes :: VSpace -> MDB_txn -> [Allocation] -> IO ()
+writeSecondaryIndexes vc wtx = mapM_ recordAlloc where
+    recordAlloc an =
+        if (BS.null (alloc_name an)) then return () else
+        if isPVarAddr (alloc_addr an) then recordPVar an else
+        recordVRef an
+    rootFlags = compileWriteFlags [MDB_NOOVERWRITE] -- don't change PVar data
+    recordPVar an =
+        withByteStringVal (alloc_name an) $ \ vKey ->
+        withAddrVal (alloc_addr an) $ \ vData -> 
+        mdb_put' rootFlags wtx (vcache_db_vroots vc) vKey vData >>= \ kExist ->
+        when kExist (fail $ "VCache bug: root " ++ show (alloc_name an) ++ " created twice")
+    hashFlags = compileWriteFlags [MDB_NODUPDATA] -- allocated VRef should not already exist
+    recordVRef an =
+        withByteStringVal (alloc_name an) $ \ vKey ->
+        withAddrVal (alloc_addr an) $ \ vData ->
+        mdb_put' hashFlags wtx (vcache_db_caddrs vc) vKey vData >>= \ kvExist ->
+        when kvExist (fail $ "VCache bug: VRef#" ++ show (alloc_addr an) ++ " written twice")
+
+
+-- when processing write batches, we'll need to track
+-- differences in reference counts for each address.
+type WithRefct = StateT RefCtDiff
+type RefCtDiff = Map Address Int
+
+incRefs :: (Monad m) => [Address] -> WithRefct m ()
+incRefs = modify . addRefCts
+{-# INLINE incRefs #-}
+
+addRefCts :: [Address] -> RefCtDiff -> RefCtDiff
+addRefCts = flip (L.foldl' altr) where
+    altr rc addr = Map.alter (Just . maybe 1 (+ 1)) addr rc 
+{-# INLINABLE addRefCts #-}
+
+withAddrVal :: Address -> (MDB_val -> IO a) -> IO a
+withAddrVal addr action = alloca $ \ pAddr -> do
+    poke pAddr addr
+    action $ MDB_val { mv_data = castPtr pAddr
+                     , mv_size = fromIntegral (sizeOf addr) 
+                     }
+{-# INLINE withAddrVal #-}
+
+-- compute reference counts associated with a write batch.
+batchRefcts :: WriteBatch -> RefCtDiff 
+batchRefcts = L.foldl' (flip addRefCts) Map.empty . fmap snd . Map.elems
+{-# INLINABLE batchRefcts #-}
+
+-- read dependencies for list of addresses into database. This requires a 
+-- partial read for each involved element, i.e. just vgetInit. A cursor
+-- is used, thus fastest if addresses are provided in sorted order.
+--
+-- It's an error if any of these addresses are not defined or cannot be
+-- read. These should not be freshly allocated addresses.
+readDeps :: VSpace -> MDB_txn -> [Address] -> IO RefCtDiff
+readDeps vc rtx addrs =
+    fail "VCache todo: read reference counts used by each updated address"
+
+-- update reference counts in the database. This requires, for each 
+-- address, reading the old reference count and writing a new value. 
+updateReferenceCounts :: VSpace -> MDB_txn -> MDB_txn -> RefCtDiff -> IO ()
+updateReferenceCounts vc wtx rtx rcDiff =
+    fail "VCache todo: update reference counts for each address"
+
+-- Primary code for updating the virtual memory. This writes in two
+-- phases: first, it updates existing content, then writes any new
+-- content to the end of the address space. This operation does not
+-- attempt to read anything.
+updateVirtualMemory :: VSpace -> MDB_txn -> Address -> WriteBatch -> IO ()
+updateVirtualMemory vc wtx allocStart fb = 
+    fail "VCache todo: update memory"
+
+
+runGarbageCollector :: VSpace -> MDB_txn -> MDB_txn -> Address -> IO ()
+runGarbageCollector vc wtx rtx ub =
+    fail "TODO: garbage collection"
 
