@@ -34,6 +34,14 @@ import Database.VCache.RWLock
 type WriteBatch = Map Address WriteCell
 type WriteCell = (ByteString, [Address])
 
+-- when processing write batches, we'll need to track
+-- differences in reference counts for each address.
+type RefCtDiff = Map Address Int
+
+
+addrSize :: Int
+addrSize = sizeOf (undefined :: Address)
+
 -- How many threads?
 --
 -- If I have just one writer thread, it would be responsible taking
@@ -97,7 +105,9 @@ type WriteCell = (ByteString, [Address])
 -- | Create the writer thread(s). These threads run in the background
 -- and are responsible for pushing data from PVars to the LMDB layer. 
 initWriterThreads :: VSpace -> IO ()
-initWriterThreads = task . writerStep where
+initWriterThreads vc = begin where
+    begin = do
+        task (writerStep vc)
     task step = void (forkIO (forever step `catch` onE))
     onE :: SomeException -> IO ()
     onE e | isBlockedOnMVar e = return ()
@@ -126,7 +136,7 @@ writerStep :: VSpace -> IO ()
 writerStep vc = withRWLock (vcache_rwlock vc) $ do
     takeMVar (vcache_signal vc) 
     ws <- atomically (takeWrites (vcache_writes vc))
-    wb <- batchWrites (write_data ws)
+    wb <- seralizeWrites (write_data ws)
     af <- atomicModifyIORef (vcache_allocator vc) allocFrameStep
     let ab = Map.map fnWriteAlloc (alloc_list af) -- Map Address ByteString
     let fb = Map.union wb ab -- favor written data over allocations
@@ -135,26 +145,31 @@ writerStep vc = withRWLock (vcache_rwlock vc) $ do
     wtx <- mdb_txn_begin (vcache_db_env vc) Nothing False  -- read-write 
     rtx <- mdb_txn_begin (vcache_db_env vc) Nothing True   -- read-only
 
-    -- record the secondary index updates
+    -- record secondary indexes: PVar roots, VRef hashes
     writeSecondaryIndexes vc wtx (Map.elems (alloc_list af))
 
-    -- update the reference counts
-    let rcInc = batchRefcts fb
-    rcDec <- readDeps vc rtx (L.takeWhile (< allocInit) $ Map.keys fb)
-    let rcDiff = Map.unionWith (-) rcInc rcDec
-    updateReferenceCounts vc wtx rtx rcDiff
+    -- update reference counts. 
+    rcDepsOld <- readDeps vc rtx (L.takeWhile (< allocInit) $ Map.keys fb)      -- lost references from old content
+    let rcDepsNew = Map.foldr' (addRefCts . snd) Map.empty fb                   -- new references from new content
+    let rcAlloc = fmap (\ an -> if isNewRoot an then 1 else 0) (alloc_list af)  -- new references from allocations
+    let rcDepsDiff = Map.filter (/= 0) $ Map.unionWith (-) rcDepsNew rcDepsOld  -- difference in content refcts
+    let rcBatch = Map.unionWith (+) rcDepsDiff rcAlloc                          -- plus references for allocations
+    assertValidOldDeps allocInit rcDepsOld                                      -- sanity check
+    updateReferenceCounts vc wtx rtx rcBatch                                    -- write batch of reference counts
 
     -- update the virtual memory
-    updateVirtualMemory vc wtx (alloc_init af) fb
+    updateVirtualMemory vc wtx allocInit fb
 
     -- perform garbage collection
-    runGarbageCollector vc wtx rtx (alloc_init af)
+    runGarbageCollector vc wtx rtx allocInit 
 
     -- finish up
     mdb_txn_abort  rtx
     mdb_txn_commit wtx
     mapM_ syncSignal (write_sync ws)
 
+isNewRoot :: Allocation -> Bool
+isNewRoot an = isPVarAddr (alloc_addr an) && not (BS.null (alloc_name an))
 
 takeWrites :: TVar Writes -> STM Writes
 takeWrites tv = do
@@ -162,9 +177,9 @@ takeWrites tv = do
     writeTVar tv (Writes Map.empty [])
     return wb
 
-batchWrites :: WriteLog -> IO WriteBatch
-batchWrites = Map.traverseWithKey (const writeTxW)
-{-# INLINE batchWrites #-}
+seralizeWrites :: WriteLog -> IO WriteBatch
+seralizeWrites = Map.traverseWithKey (const writeTxW)
+{-# INLINE seralizeWrites #-}
 
 writeTxW :: TxW -> IO WriteCell
 writeTxW (TxW pv v) =
@@ -240,14 +255,6 @@ writeSecondaryIndexes vc wtx = mapM_ recordAlloc where
         when kvExist (fail $ "VCache bug: VRef#" ++ show (alloc_addr an) ++ " written twice")
 
 
--- when processing write batches, we'll need to track
--- differences in reference counts for each address.
-type WithRefct = StateT RefCtDiff
-type RefCtDiff = Map Address Int
-
-incRefs :: (Monad m) => [Address] -> WithRefct m ()
-incRefs = modify . addRefCts
-{-# INLINE incRefs #-}
 
 addRefCts :: [Address] -> RefCtDiff -> RefCtDiff
 addRefCts = flip (L.foldl' altr) where
@@ -262,11 +269,6 @@ withAddrVal addr action = alloca $ \ pAddr -> do
                      }
 {-# INLINE withAddrVal #-}
 
--- compute reference counts associated with a write batch.
-batchRefcts :: WriteBatch -> RefCtDiff 
-batchRefcts = L.foldl' (flip addRefCts) Map.empty . fmap snd . Map.elems
-{-# INLINABLE batchRefcts #-}
-
 -- read dependencies for list of addresses into database. This requires a 
 -- partial read for each involved element, i.e. just vgetInit. A cursor
 -- is used, thus fastest if addresses are provided in sorted order.
@@ -274,14 +276,70 @@ batchRefcts = L.foldl' (flip addRefCts) Map.empty . fmap snd . Map.elems
 -- It's an error if any of these addresses are not defined or cannot be
 -- read. These should not be freshly allocated addresses.
 readDeps :: VSpace -> MDB_txn -> [Address] -> IO RefCtDiff
-readDeps vc rtx addrs =
-    fail "VCache todo: read reference counts used by each updated address"
+readDeps _ _ [] = return Map.empty
+readDeps vc rtx addrs = 
+    alloca $ \ pAddr -> 
+    alloca $ \ pvAddr ->
+    alloca $ \ pvData -> do
+    poke pvAddr $ MDB_val { mv_data = castPtr pAddr, mv_size = fromIntegral addrSize }
+    rdMem <- mdb_cursor_open' rtx (vcache_db_memory vc) 
+    let addrDeps rcd addr = do
+            poke pAddr addr
+            bFound <- mdb_cursor_get' MDB_SET rdMem pvAddr pvData
+            unless bFound (fail ("VCache: address " ++ show addr ++ " not defined")) -- should not happen
+            vData <- peek pvData
+            depAddrs <- readDataDeps vc vData
+            return $! (addRefCts depAddrs rcd)
+    rcDiffs <- foldM addrDeps Map.empty addrs
+    mdb_cursor_close' rdMem
+    return rcDiffs
+
+readDataDeps :: VSpace -> MDB_val -> IO [Address]
+readDataDeps vc vData = _vget vgetInit state0 >>= toDeps where
+    toDeps (VGetR () sf) = return (vget_children sf)
+    toDeps (VGetE eMsg) = fail ("VCache: malformed data\n" ++ indent "  " eMsg) -- should not happen
+    state0 = VGetS
+        { vget_children = []
+        , vget_target = mv_data vData
+        , vget_limit = mv_data vData `plusPtr` fromIntegral (mv_size vData)
+        , vget_space = vc
+        }
+
+-- this is just a paranoid check. It should not fail, unless there is
+-- a bug in VCache or similar... or if you manage to allocate all 2^63
+-- addresses (which would take a quarter million years at one million
+-- allocations per second). 
+assertValidOldDeps :: Address -> RefCtDiff -> IO ()
+assertValidOldDeps allocStart rcDec = case Map.maxViewWithKey rcDec of
+    Nothing -> return ()
+    Just ((maxOldDep,_), _) -> unless (allocStart > maxOldDep) $ fail $
+        "VCache bug: using address in allocator's space" -- should not happen
 
 -- update reference counts in the database. This requires, for each 
--- address, reading the old reference count and writing a new value. 
+-- address, reading the old reference count then writing a new value. 
+-- 
+-- Computing a negative reference count is treated as a major error.
+--
+-- Reference counts use a variable-width encoding, leveraging that
+-- we know the mv_data size. One byte is used for values in the
+-- 1..256 range, two bytes for 257..65536, etc.. A zero reference
+-- count is not recorded in the vcache_db_refcts table.
+--
 updateReferenceCounts :: VSpace -> MDB_txn -> MDB_txn -> RefCtDiff -> IO ()
+updateReferenceCounts _ _ _ rcd | Map.null rcd = return ()
 updateReferenceCounts vc wtx rtx rcDiff =
-    fail "VCache todo: update reference counts for each address"
+    alloca $ \ pAddr ->
+    allocaBytes 8 $ \ pRefct -> 
+    alloca $ \ pvAddr ->
+    alloca $ \ pvData -> do
+    poke pAddr (0 :: Address) -- temporary (for type inference)
+    poke pvAddr $ MDB_val { mv_data = castPtr pAddr, mv_size = fromIntegral addrSize }
+    poke pvData $ MDB_val { mv_data = pRefct, mv_size = 1 } -- temporary (for type inference)
+    rrc <- mdb_cursor_open' rtx (vcache_db_refcts vc) -- read old reference counts
+    wrc <- mdb_cursor_open' wtx (vcache_db_refcts vc) -- write new reference counts
+    wc0 <- mdb_cursor_open' wtx (vcache_db_refct0 vc) -- write zeroes to support GC 
+    fail "VCache todo: update reference counts"
+
 
 -- Primary code for updating the virtual memory. This writes in two
 -- phases: first, it updates existing content, then writes any new

@@ -78,13 +78,14 @@ vcFlags = [MDB_NOSUBDIR     -- open file name, not directory name
           ]
 
 --
--- I'm providing a non-empty root bytestring because it allows
--- me some arbitrary namespaces for VCache internal use, if I
--- ever feel the need to use them. Also, I will use the empty
--- bytestring to indicate anonymous PVars in the Allocation type.
+-- I'm providing a non-empty root bytestring. There are a few reasons
+-- for this. LMDB doesn't support zero-sized keys. And the empty
+-- bytestring will indicate anonymous PVars in the allocator. And if
+-- I ever want PVar roots within VCache, I can use a different prefix.
 --
--- The maximum path, including the PVar name, is 511 bytes. That
--- should be enough for almost any use case.
+-- The maximum path, including the PVar name, is 511 bytes. That is
+-- enough for almost any use case, especially since roots should not
+-- depend on domain data. Too large a path results in runtime error.
 vcRootPath :: BS.ByteString
 vcRootPath = BS.singleton 47
 
