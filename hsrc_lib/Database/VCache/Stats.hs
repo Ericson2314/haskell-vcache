@@ -7,7 +7,7 @@ module Database.VCache.Stats
 import Database.LMDB.Raw
 import Database.VCache.Types
 import Data.IORef
-import qualified Data.IntMap as IntMap
+import qualified Data.Map.Strict as Map
 
 -- | Compute some miscellaneous statistics for a VCache instance at
 -- runtime. These aren't really useful for anything, except to gain
@@ -28,8 +28,8 @@ vcacheStats (VCache vc _) = withRdOnlyTxn vc $ \ txnStat -> do
     let vrefCount = (fromIntegral $ ms_entries hashStat) 
     let pvarCount = (fromIntegral $ ms_entries memStat) - vrefCount
     let rootCount = (fromIntegral $ ms_entries rootStat)
-    let memVRefs = IntMap.size memVRefsMap
-    let memPVars = IntMap.size memPVarsMap
+    let memVRefs = Map.foldl' (\ a b -> a + Map.size b) 0 memVRefsMap
+    let memPVars = Map.size memPVarsMap
     let allocPos = alloc_new_addr allocSt
     return $ VCacheStats
         { vcstat_file_size = fileSize

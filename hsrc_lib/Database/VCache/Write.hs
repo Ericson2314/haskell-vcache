@@ -131,6 +131,7 @@ writerStep vc = withRWLock (vcache_rwlock vc) $ do
     let ab = Map.map fnWriteAlloc (alloc_list af) -- Map Address ByteString
     let fb = Map.union wb ab -- favor written data over allocations
     let allocInit = alloc_init af 
+
     wtx <- mdb_txn_begin (vcache_db_env vc) Nothing False  -- read-write 
     rtx <- mdb_txn_begin (vcache_db_env vc) Nothing True   -- read-only
 

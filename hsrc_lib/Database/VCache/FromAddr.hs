@@ -9,9 +9,7 @@ module Database.VCache.FromAddr
 import Control.Monad
 import Data.IORef
 import Data.Typeable
-import Data.Typeable.Internal (TypeRep(..),Fingerprint(..))
-import qualified Data.IntMap.Strict as IntMap
-import qualified Data.List as L
+import qualified Data.Map.Strict as Map
 import Control.Concurrent.STM.TVar
 import System.Mem.Weak (Weak)
 import qualified System.Mem.Weak as Weak
@@ -42,29 +40,30 @@ loadMemCache :: (Typeable a) => a -> VSpace -> Address -> Cache a -> IO (IORef (
 loadMemCache _dummy space addr ini = atomicModifyIORef mcrf loadCache where
     mcrf = vcache_mem_vrefs space
     typa = typeOf _dummy
-    hkey = hashVRef typa addr
-    match eph = (addr == eph_addr eph) -- must match address
-             && (typa == eph_type eph) -- must match type
     getCache = unsafeDupablePerformIO . Weak.deRefWeak . _unsafeEphWeak
-    loadCache mc =
-        let oldCache = IntMap.lookup hkey mc >>= L.find match >>= getCache in
-        case oldCache of
-            Just c -> (mc, c)
-            Nothing -> unsafePerformIO (initCache mc)
-    initCache mc = do
-        c <- newIORef ini
-        wc <- mkWeakIORef c (return ())
-        let eph = Eph { eph_addr = addr, eph_type = typa, eph_weak = wc }
-        let addEph = Just . (eph:) . maybe [] id
-        let mc' = IntMap.alter addEph hkey mc 
-        return (mc',c)
+    find mc = Map.lookup addr mc >>= Map.lookup typa >>= getCache
+    loadCache mc = case find mc of
+        Just c -> (mc, c)
+        Nothing -> unsafePerformIO $ do
+            c <- newIORef ini
+            wc <- mkWeakIORef c (return ())
+            let eph = Eph { eph_addr = addr, eph_type = typa, eph_cache = wc }
+            let mc' = addEph eph mc
+            return (mc', c)
 {-# NOINLINE loadMemCache #-}
+
+addEph :: Eph -> EphMap -> EphMap
+addEph e = Map.alter (Just . maybe i0 ins) (eph_addr e) where
+    ty = eph_type e
+    i0 = Map.singleton ty e
+    ins = Map.insert ty e
+{-# INLINABLE addEph #-}
 
 -- this is a bit of a hack... it is unsafe in general, since
 -- Eph doesn't track the type `a`. We'll coerce it, assuming
 -- the type is known in context.
 _unsafeEphWeak :: Eph -> Weak (IORef (Cache a))
-_unsafeEphWeak (Eph { eph_weak = w }) = _unsafeCoerceWeakCache w 
+_unsafeEphWeak (Eph { eph_cache = w }) = _unsafeCoerceWeakCache w 
 {-# INLINE _unsafeEphWeak #-}
 
 -- unsafe coercion; used in contexts where we know type 
@@ -72,25 +71,6 @@ _unsafeEphWeak (Eph { eph_weak = w }) = _unsafeCoerceWeakCache w
 _unsafeCoerceWeakCache :: Weak (IORef (Cache b)) -> Weak (IORef (Cache a))
 _unsafeCoerceWeakCache = unsafeCoerce
 {-# INLINE _unsafeCoerceWeakCache #-}
-
--- Hash function for the VRef ephemeron table
---
--- In this case, I want to include the type representation
--- because address collisions are quite possible for many
--- different types.
---
--- By comparison, PVars don't use typerep for hashing;
--- multiple typereps for one address is illegal anyway.
-hashVRef :: TypeRep -> Address -> Int
-hashVRef (TypeRep (Fingerprint a b) _ _) addr = hA + hB + hAddr where
-    hA = p_10k * fromIntegral a 
-    hB = p_100 * fromIntegral b
-    hAddr = p_1000 * fromIntegral addr
-    p_100 = 541
-    p_1000 = 7919
-    p_10k = 104729
-{-# INLINE hashVRef #-}
-
 
 -- | Obtain a PVar given an address. The PVar will lazily load
 -- when first read, and only if read.
@@ -123,33 +103,34 @@ loadPVarData :: (Typeable a) => a -> VSpace -> Address -> RDV a -> IO (TVar (RDV
 loadPVarData _dummy space addr ini = atomicModifyIORef pvtbl loadData >>= id where
     pvtbl = vcache_mem_pvars space
     typa = typeOf _dummy
-    hkey = fromIntegral addr
-    match eph = (addr == pveph_addr eph)
     getData = unsafeDupablePerformIO . Weak.deRefWeak . _unsafeDataWeak
-    loadData mpv = case IntMap.lookup hkey mpv >>= L.find match of
+    loadData mpv = case Map.lookup addr mpv of
+        Nothing -> initData mpv
         Just e ->
-            if (pveph_type e /= typa) then (mpv, fail (typeMismatch e)) else
+            let bTypeMismatch = pveph_type e /= typa in
+            if bTypeMismatch then (mpv, fail (eTypeMismatch e)) else
             case getData e of
-                Just d -> (mpv, return d)
-                Nothing -> newData mpv
-        Nothing -> newData mpv
-    newData = unsafePerformIO . initData
-    initData mpv = do
+                Nothing -> initData mpv
+                Just d  -> (mpv, return d)
+    initData mpv = unsafePerformIO $ do
         d <- newTVarIO ini
         wd <- mkWeakTVar d (return ())
-        let eph = PVEph { pveph_addr = addr, pveph_type = typa, pveph_weak = wd }
-        let addEph = Just . (eph:) . maybe [] id
-        let mpv' = IntMap.alter addEph hkey mpv
+        let pve = PVEph { pveph_addr = addr, pveph_type = typa, pveph_data = wd }
+        let mpv' = addPVEph pve mpv 
         return (mpv', return d)
-    typeMismatch e = ($ "") $
+    eTypeMismatch e = ($ "") $
         showString "PVar user error: address " . shows addr .
         showString " type mismatch on load. " .
         showString " Existing: " . shows (pveph_type e) .
         showString " Expecting: " . shows typa
 {-# NOINLINE loadPVarData #-}
 
+addPVEph :: PVEph -> PVEphMap -> PVEphMap
+addPVEph pve = Map.insert (pveph_addr pve) pve
+{-# INLINE addPVEph #-}
+
 _unsafeDataWeak :: PVEph -> Weak (TVar (RDV a))
-_unsafeDataWeak (PVEph { pveph_weak = w }) = _unsafeCoerceWeakData w
+_unsafeDataWeak (PVEph { pveph_data = w }) = _unsafeCoerceWeakData w
 {-# INLINE _unsafeDataWeak #-}
 
 _unsafeCoerceWeakData :: Weak (TVar (RDV b)) -> Weak (TVar (RDV a))

@@ -116,8 +116,8 @@ openVC' nBytes fl fp = do
         let allocStart = nextAllocAddress allocEnd
         let initAllocator = freshAllocator allocStart
         allocator <- newIORef initAllocator
-        memVRefs <- newIORef IntMap.empty
-        memPVars <- newIORef IntMap.empty
+        memVRefs <- newIORef Map.empty
+        memPVars <- newIORef Map.empty
         tvWrites <- newTVarIO (Writes Map.empty [])
         mvSignal <- newMVar () 
         rwLock <- newRWLock

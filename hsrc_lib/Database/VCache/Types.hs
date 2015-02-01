@@ -107,15 +107,17 @@ instance Show (VRef a) where showsPrec _ v = showString "VRef#" . shows (vref_ad
 -- For every VRef we have in memory, we need an ephemeron in a table.
 -- This ephemeron table supports structure sharing, caching, and GC.
 -- I model this ephemeron by use of `mkWeakMVar`.
-data Eph = forall a . Eph
-    { eph_addr :: {-# UNPACK #-} !Address
-    , eph_type :: !TypeRep
-    , eph_weak :: {-# UNPACK #-} !(Weak (IORef (Cache a)))
-    }
-type EphMap = IntMap [Eph] -- bucket hashmap on Address & TypeRep
-    -- type must be part of hash, or we'll have too many collisions
-    -- where values tend to overlap in representation, e.g. the 
-    -- 'empty' values.
+data Eph = forall a . Eph 
+    { eph_addr  :: {-# UNPACK #-} !Address
+    , eph_type  :: !TypeRep
+    , eph_cache :: {-# UNPACK #-} !(Weak (IORef (Cache a)))
+    } 
+type EphMap = Map Address (Map TypeRep Eph)
+    -- Address is at the top layer of the map, here, because that greatly
+    -- simplifies the garbage collector: it can simply check whether an 
+    -- address is in use. The TypeRep is also necessary because a single
+    -- Address can (via structure sharing at the serialization layer) have
+    -- many types.
 
 -- Every VRef contains its own cache. (Thus, there is no extra lookup
 -- overhead to test the cache, and this simplifies interaction with GC). 
@@ -191,12 +193,12 @@ instance Eq (PVar a) where (==) = (==) `on` pvar_data
 instance Show (PVar a) where showsPrec _ pv = showString "PVar#" . shows (pvar_addr pv)
 
 -- ephemeron table for PVars.
-data PVEph = forall a . PVEph
+data PVEph = forall a . PVEph 
     { pveph_addr :: {-# UNPACK #-} !Address
     , pveph_type :: !TypeRep
-    , pveph_weak :: {-# UNPACK #-} !(Weak (TVar (RDV a)))
-    } 
-type PVEphMap = IntMap [PVEph]
+    , pveph_data :: {-# UNPACK #-} !(Weak (TVar (RDV a)))
+    }
+type PVEphMap = Map Address PVEph
 
 -- I need some way to force an evaluation when a PVar is first
 -- read, i.e. in order to load the initial value, without forcing
