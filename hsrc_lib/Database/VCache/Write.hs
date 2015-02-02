@@ -289,25 +289,26 @@ updateReferenceCounts vc txn allocInit rcDiffMap =
     wc0 <- mdb_cursor_open' txn (vcache_db_refct0 vc) -- write zeroes for ephemeral values
 
     -- the logic is inlined here for easy access to buffers and cursors
-    let appendFlags = compileWriteFlags [MDB_APPEND]
-    let updateFlags = compileWriteFlags []
-    let updateCurrent = compileWriteFlags [MDB_CURRENT]
+    let appendEntry  = compileWriteFlags [MDB_APPEND]
+    let updateKey    = compileWriteFlags []
+    let updateCursor = compileWriteFlags [MDB_CURRENT]
+    let deleteCursor = compileWriteFlags []
     let newEphemeron addr = void $ do -- just write a zero (no persistent references)
             poke pAddr addr -- prepare vAddr and pvAddr
-            mdb_cursor_put' appendFlags wc0 vAddr vZero
+            mdb_cursor_put' appendEntry wc0 vAddr vZero
     let newAllocation addr rc =
             if (0 == rc) then newEphemeron addr else void $ do
             unless (rc > 0) (addrBug addr "allocated with negative refct")
             vRefct <- writeRefctBytes pRefctBuff rc
             poke pAddr addr -- prepare vAddr and pvAddr
-            mdb_cursor_put' appendFlags wrc vAddr vRefct
+            mdb_cursor_put' appendEntry wrc vAddr vRefct
     let moveFromZero addr rc = void $ do
             unless (rc > 0) (addrBug addr "has negative refct")
             bZeroFound <- mdb_cursor_get' MDB_SET wc0 pvAddr pvData
             unless bZeroFound (addrBug addr "has undefined refct")
-            mdb_cursor_del' updateFlags wc0 -- delete old zero!
+            mdb_cursor_del' deleteCursor wc0 -- delete old zero!
             vRefct <- writeRefctBytes pRefctBuff rc
-            mdb_cursor_put' updateFlags wrc vAddr vRefct
+            mdb_cursor_put' updateKey wrc vAddr vRefct
     let updateRefct (addr,rcDiff) = 
             if (addr >= allocInit) then newAllocation addr rcDiff else 
             if (rcDiff /= 0) then addrBug addr "invalid refct update" else
@@ -318,10 +319,10 @@ updateReferenceCounts vc txn allocInit rcDiffMap =
             let rc = rcOld + rcDiff in
             if (rc < 0) then addrBug addr "updated to negative refct" else
             if (0 == rc) 
-                then do mdb_cursor_del' updateFlags wrc
-                        void $ mdb_cursor_put' updateFlags wc0 vAddr vZero
+                then do mdb_cursor_del' deleteCursor wrc
+                        void $ mdb_cursor_put' updateKey wc0 vAddr vZero
                 else do vRefct <- writeRefctBytes pRefctBuff rc
-                        void $ mdb_cursor_put' updateCurrent wrc vAddr vRefct
+                        void $ mdb_cursor_put' updateCursor wrc vAddr vRefct
 
     -- process every reference count update
     mapM_ updateRefct (Map.toAscList rcDiffMap)
