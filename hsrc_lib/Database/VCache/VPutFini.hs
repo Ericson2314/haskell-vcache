@@ -90,27 +90,6 @@ putVarNatR' n =
     putWord8 (0x80 .|. fromIntegral r) >>
     putVarNatR' q
 
-
-{- 
--- use realloc to shrink the buffer to the minimum size
--- (Is really worth doing? I'll disable it for now.)
-shrinkBuffer :: VPut ()
-shrinkBuffer = VPut $ \ s ->
-    readIORef (vput_buffer s) >>= \ pStart ->
-    let size = (vput_target s) `minusPtr` pStart in
-    reallocBytes pStart size >>= \ pStart' ->
-    writeIORef (vput_buffer s) pStart' >>
-    let pLimit = pStart' `plusPtr` size in
-    let s' = s { vput_target = pLimit, vput_limit = pLimit } in
-    return (VPutR () s')
-
-I should probably evaluate whether this is worthwhile. The buffer will be
-free in a very short while, so I think it wouldn't matter so much whether
-we shrink it. I'd rather avoid extra interactions with the C allocator,
-since it generally requires some synchronization between threads.
-
--}    
-
 runVPutIO :: VSpace -> VPut a -> IO (a, ByteString, [PutChild])
 runVPutIO vs action = do
     let initialSize = 1000 -- avoid reallocs for small data
@@ -127,8 +106,9 @@ runVPutIO vs action = do
     let runPut = _vput fullWrite s0
     (VPutR r sf) <- runPut `onException` freeBuff
     pBuff' <- readIORef vBuff
-    fpBuff' <- newForeignPtr finalizerFree pBuff'
     let len = vput_target sf `minusPtr` pBuff'
+    pBuffR <- reallocBytes pBuff len -- reclaim unused space
+    fpBuff' <- newForeignPtr finalizerFree pBuffR
     let bytes = BSI.fromForeignPtr fpBuff' 0 len
     return (r, bytes, vput_children sf)
 {-# NOINLINE runVPutIO #-}
