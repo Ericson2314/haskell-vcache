@@ -14,7 +14,6 @@ import Foreign.Ptr
 
 import Data.Bits
 import Data.IORef
-import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import qualified Data.ByteString as BS
 import qualified Data.List as L
@@ -175,6 +174,6 @@ findLastAddrAllocated txn dbiMemory = alloca $ \ pKey ->
 
 freshAllocator :: Address -> Allocator
 freshAllocator addr =
-    let f0 = AllocFrame Map.empty IntMap.empty addr in
+    let f0 = AllocFrame Map.empty Map.empty addr in
     Allocator addr f0 f0 f0
 

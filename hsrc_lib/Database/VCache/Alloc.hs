@@ -18,7 +18,6 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.List as L
 import qualified Data.Map.Strict as Map
-import qualified Data.IntMap.Strict as IntMap
 import Foreign.C.Types
 import Foreign.Ptr
 import Foreign.Storable
@@ -74,9 +73,8 @@ _loadRootPVarIO vc name defaultVal = withRdOnlyTxn vc $ \ txn ->
 -- a short period.
 allocNamedPVar :: ByteString -> ByteString -> [PutChild] -> Allocator -> (Allocator, Address)
 allocNamedPVar _name _data _deps ac =
-    let hkey = allocNameHash 1 _name in
-    let match an = isPVarAddr (alloc_addr an) && (_name == (alloc_name an)) in
-    let ff frm = IntMap.lookup hkey (alloc_seek frm) >>= L.find match in
+    let match an = isPVarAddr (alloc_addr an) in
+    let ff frm = Map.lookup _name (alloc_seek frm) >>= L.find match in
     case allocFrameSearch ff ac of
         Just an -> (ac, alloc_addr an) -- allocated very recently
         Nothing ->
@@ -87,7 +85,7 @@ allocNamedPVar _name _data _deps ac =
                                 , alloc_addr = 1 + newAddr
                                 }
             in
-            let frm' = addToFrameS an hkey (alloc_frm_next ac) in
+            let frm' = addToFrame an (alloc_frm_next ac) in
             let ac' = ac { alloc_new_addr = 2 + newAddr, alloc_frm_next = frm' } in
             (ac', alloc_addr an)
 
@@ -259,9 +257,8 @@ peekAddr v =
 -- a potential match in case an identical VRef was very recently allocated!
 allocVRef :: ByteString -> ByteString -> [PutChild] -> Allocator -> (Allocator, Address)
 allocVRef _name _data _deps ac =
-    let hkey = allocNameHash 1 _name in
     let match an = isVRefAddr (alloc_addr an) && (_data == (alloc_data an)) in
-    let ff frm = IntMap.lookup hkey (alloc_seek frm) >>= L.find match in
+    let ff frm = Map.lookup _name (alloc_seek frm) >>= L.find match in
     case allocFrameSearch ff ac of
         Just an -> (ac, alloc_addr an)
         Nothing ->
@@ -272,33 +269,21 @@ allocVRef _name _data _deps ac =
                                 , alloc_addr = newAddr
                                 }
             in
-            let frm' = addToFrameS an hkey (alloc_frm_next ac) in
+            let frm' = addToFrame an (alloc_frm_next ac) in
             let ac' = ac { alloc_new_addr = 2 + newAddr, alloc_frm_next = frm' } in
             (ac', newAddr)
 
--- Compute a simple hash function for use within the allocation frames.
--- This doesn't need to be very good, just fast and good enough to 
--- avoid collisions within one allocation frame.
-allocNameHash :: Int -> ByteString -> Int
-allocNameHash n bs = case BS.uncons bs of
-    Nothing -> 101*n
-    Just (w8,bs') -> 
-        let w8i = fromIntegral w8 in
-        let n' = (173 * n) + (83 * w8i) in
-        allocNameHash n' bs'
-
 -- add annotation to frame without seek
 addToFrame :: Allocation -> AllocFrame -> AllocFrame
-addToFrame an frm =
+addToFrame an frm 
+ | BS.null (alloc_name an) = -- anonymous PVars 
+    assert (isPVarAddr (alloc_addr an)) $
     let list' = Map.insert (alloc_addr an) an (alloc_list frm) in
     frm { alloc_list = list' }
-
--- add annotation to frame with seek
-addToFrameS :: Allocation -> Int -> AllocFrame -> AllocFrame
-addToFrameS an hkey frm =
+ | otherwise = -- root PVars or hashed VRefs 
     let list' = Map.insert (alloc_addr an) an (alloc_list frm) in
     let add_an = Just . (an:) . maybe [] id in
-    let seek' = IntMap.alter add_an hkey (alloc_seek frm) in
+    let seek' = Map.alter add_an (alloc_name an) (alloc_seek frm) in
     frm { alloc_list = list', alloc_seek = seek' }
 
 -- report allocation to the writer threads

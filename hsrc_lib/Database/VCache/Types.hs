@@ -32,7 +32,6 @@ import Data.Word
 import Data.Function (on)
 import Data.Typeable
 import Data.IORef
-import Data.IntMap.Strict (IntMap)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.ByteString (ByteString)
@@ -316,9 +315,9 @@ data Allocator = Allocator
     }
 
 data AllocFrame = AllocFrame 
-    { alloc_list :: !(Map Address Allocation) -- allocated addresses
-    , alloc_seek :: !(IntMap [Allocation])    -- hash map (for roots and VRefs)
-    , alloc_init :: {-# UNPACK #-} !Address   -- alloc_new_addr at frame init.
+    { alloc_list :: !(Map Address Allocation)       -- allocated addresses
+    , alloc_seek :: !(Map ByteString [Allocation])  -- named addresses
+    , alloc_init :: {-# UNPACK #-} !Address         -- alloc_new_addr at frame init.
     }
 
 data Allocation = Allocation

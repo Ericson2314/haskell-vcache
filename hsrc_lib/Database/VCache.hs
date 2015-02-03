@@ -2,7 +2,9 @@
 
 module Database.VCache
     ( VRef, vref, vref', deref, deref'
-    , PVar, newPVar, newPVarIO, readPVar, writePVar
+    , PVar, newPVar, newPVarIO
+    , readPVar, readPVarIO, writePVar
+    , modifyPVar, modifyPVar', swapPVar
     , VTx, runVTx, liftSTM, markDurable
     , VCache, openVCache
     , loadRootPVar, loadRootPVarIO

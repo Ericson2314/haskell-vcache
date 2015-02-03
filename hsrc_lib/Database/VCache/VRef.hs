@@ -20,6 +20,7 @@ import Database.VCache.Read
 -- arrange for the value to be written to disk. 
 vref :: (VCacheable a) => VSpace -> a -> VRef a
 vref vc v = unsafePerformIO (newVRefIO vc v CacheMode1)
+{-# INLINABLE vref #-}
 
 -- | The normal vref constructor will cache the value, using heuristic
 -- timeouts and weight metrics to decide when to remove the value from
@@ -34,6 +35,7 @@ vref vc v = unsafePerformIO (newVRefIO vc v CacheMode1)
 --
 vref' :: (VCacheable a) => VSpace -> a -> VRef a
 vref' vc v = unsafePerformIO (newVRefIO' vc v)
+{-# INLINABLE vref' #-}
 
 readVRef :: VRef a -> IO (a, Int)
 readVRef v = readAddrIO (vref_space v) (vref_addr v) (vref_parse v)
@@ -58,6 +60,7 @@ deref v = unsafeDupablePerformIO $
             let (r,w) = lazy_read_rw in
             let c' = mkVRefCache r w CacheMode1 in
             c' `seq` (c',r)
+{-# NOINLINE deref #-}
 
 -- | Dereference a VRef. Will use the cached value if available, but
 -- will not cache the value or reset any expiration timers. This can
@@ -68,6 +71,7 @@ deref' v = unsafePerformIO $
     readIORef (vref_cache v) >>= \ c -> case c of
         Cached r _ -> return r
         NotCached -> liftM fst (readVRef v)
+{-# INLINABLE deref' #-}
 
 -- | Each VRef has an numeric address in the VSpace. This address is
 -- non-deterministic, and essentially independent of the arguments to
@@ -80,4 +84,4 @@ deref' v = unsafePerformIO $
 -- The 'Show' instance for VRef will also show the address.
 unsafeVRefAddr :: VRef a -> Address
 unsafeVRefAddr = vref_addr
-
+{-# INLINE unsafeVRefAddr #-}
