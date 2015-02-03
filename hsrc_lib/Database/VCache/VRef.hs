@@ -5,6 +5,7 @@ module Database.VCache.VRef
     , vref, vref'
     , deref, deref'
     , unsafeVRefAddr
+    , unsafeVRefRefct
     ) where
 
 import Control.Monad
@@ -85,3 +86,21 @@ deref' v = unsafePerformIO $
 unsafeVRefAddr :: VRef a -> Address
 unsafeVRefAddr = vref_addr
 {-# INLINE unsafeVRefAddr #-}
+
+-- | This function allows developers to access the reference count 
+-- for the VRef that is currently recorded in the database. This may
+-- be useful for heuristic purposes. However, caveats are needed:
+--
+-- First, due to structure sharing, a VRef may share an address with
+-- VRefs of other types having the same serialized form. Reference 
+-- counts are at the address level.
+--
+-- Second, because the VCache writer operates in a background thread,
+-- the reference count returned here may be slightly out of date.
+--
+-- Third, it is possible that VCache will eventually use some other
+-- form of garbage collection than reference counting. This function
+-- should be considered an unstable element of the API.
+unsafeVRefRefct :: VRef a -> IO Int
+unsafeVRefRefct v = readRefctIO (vref_space v) (vref_addr v) 
+

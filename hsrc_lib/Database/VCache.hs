@@ -11,8 +11,8 @@ module Database.VCache
     , vcacheSubdir, vcacheSubdirM
     , vcacheStats, vcacheSync
     , VSpace, vcache_space, vref_space, pvar_space
-    , unsafeVRefAddr
-    , unsafePVarAddr
+    , unsafeVRefAddr, unsafeVRefRefct
+    , unsafePVarAddr, unsafePVarRefct
     , module Database.VCache.VCacheable
     ) where
 

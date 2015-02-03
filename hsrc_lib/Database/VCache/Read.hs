@@ -1,6 +1,7 @@
 
 module Database.VCache.Read
     ( readAddrIO
+    , readRefctIO
     ) where
 
 import Control.Monad
@@ -16,6 +17,7 @@ import Database.LMDB.Raw
 import Database.VCache.Types
 import Database.VCache.VGetInit
 import Database.VCache.VGetAux
+import Database.VCache.Refct
 
 -- | Parse contents at a given address. Returns both the value and the
 -- cache weight, or fails. This first tries reading the database, then
@@ -72,3 +74,18 @@ vgetWeight = VGet $ \ s ->
     let w = cacheWeight nBytes nRefs in
     w `seq` return (VGetR w s)
 {-# INLINE vgetWeight #-}
+
+
+-- | Read a reference count for a given address. 
+readRefctIO :: VSpace -> Address -> IO Int
+readRefctIO vc addr = 
+    alloca $ \ pAddr ->
+    withRdOnlyTxn vc $ \ txn -> 
+    poke pAddr addr >>
+    let vAddr = MDB_val { mv_data = castPtr pAddr
+                        , mv_size = fromIntegral (sizeOf addr) }
+    in
+    mdb_get' txn (vcache_db_refcts vc) vAddr >>= \ mbData ->
+    maybe (return 0) readRefctBytes mbData
+
+

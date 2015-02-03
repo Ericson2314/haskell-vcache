@@ -12,12 +12,14 @@ module Database.VCache.PVar
     , modifyPVar'
     , swapPVar
     , unsafePVarAddr
+    , unsafePVarRefct
     ) where
 
 import Control.Monad
 import Control.Concurrent.STM
 import Database.VCache.Types
 import Database.VCache.Alloc (newPVar, newPVarIO, loadRootPVar, loadRootPVarIO)
+import Database.VCache.Read (readRefctIO)
 
 -- | Read a PVar as part of a transaction.
 readPVar :: PVar a -> VTx a
@@ -89,4 +91,19 @@ swapPVar var new = do
 unsafePVarAddr :: PVar a -> Address
 unsafePVarAddr = pvar_addr
 {-# INLINE unsafePVarAddr #-}
+
+-- | This function allows developers to access the reference count 
+-- for the PVar that is currently recorded in the database. This may
+-- be useful for heuristic purposes. However, caveats are needed:
+--
+-- First, because the VCache writer operates in a background thread,
+-- the reference count returned here may be slightly out of date.
+--
+-- Second, it is possible that VCache will eventually use some other
+-- form of garbage collection than reference counting. This function
+-- should be considered an unstable element of the API.
+--
+-- Root PVars start with one root reference.
+unsafePVarRefct :: PVar a -> IO Int
+unsafePVarRefct var = readRefctIO (pvar_space var) (pvar_addr var)
 

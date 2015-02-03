@@ -13,9 +13,7 @@ import Control.Monad
 import Control.Exception
 import Control.Concurrent
 import Control.Concurrent.STM
-import Data.Bits
 import Data.IORef
-import Data.Word
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.List as L
@@ -34,6 +32,7 @@ import Database.VCache.Types
 import Database.VCache.VPutFini
 import Database.VCache.VGetInit
 import Database.VCache.RWLock
+import Database.VCache.Refct
 
 -- a write batch records, for each address, both some content 
 -- and a list of addresses to incref
@@ -43,7 +42,6 @@ type WriteCell = (ByteString, [Address])
 -- when processing write batches, we'll need to track
 -- differences in reference counts for each address.
 type RefctDiff = Map Address Refct
-type Refct = Int
 
 
 addrSize :: Int
@@ -263,7 +261,7 @@ updateReferenceCounts vc txn allocInit rcDiffMap =
     let updateCursor = compileWriteFlags [MDB_CURRENT]
     let updateRefct (addr,rcDiff) = 
             if (addr >= allocInit) then newAllocation addr rcDiff else 
-            if (rcDiff == 0) then addrBug addr "filter zero refct updates" else
+            if (rcDiff == 0) then return () else -- skip 0 deltas
             poke pAddr addr >> -- prepare vAddr and pvAddr
             mdb_cursor_get' MDB_SET wrc pvAddr pvData >>= \ bOldRefct ->
             if (not bOldRefct) then clearOldZero addr rcDiff else
@@ -288,33 +286,10 @@ updateReferenceCounts vc txn allocInit rcDiffMap =
 addrBug :: Address -> String -> IO a
 addrBug addr msg = fail $ "VCache bug: address " ++ show addr ++ " " ++ msg
 
--- simple variable-width encoding for reference counts. Encoding is 
--- base256 then adding 1. (The lead byte should always be non-zero,
--- but that isn't checked here.)
-readRefctBytes :: MDB_val -> IO Refct
-readRefctBytes v = rd (mv_data v) (mv_size v) 0 where
-    rd _ 0 rc = return (rc + 1)
-    rd p n rc = do
-        w8 <- peek p
-        let rc' = (rc `shiftL` 8) .|. (fromIntegral w8) 
-        rd (p `plusPtr` 1) (n - 1) rc'
-
--- compute list of bytes for a big-endian encoding. 
--- Reference count must be positive!
-toRefctBytes :: Refct -> [Word8]
-toRefctBytes = rcb [] . subtract 1 . assertPositive where
-    rcb l 0 = l
-    rcb l rc = rcb (fromIntegral rc : l) (rc `shiftR` 8)
-    assertPositive n = assert (n > 0) n
-
-writeRefctBytes :: Ptr Word8 -> Refct -> IO MDB_val
-writeRefctBytes p0 = wrcb p0 0 . toRefctBytes where
-    wrcb _ n [] = return $! MDB_val { mv_data = p0, mv_size = n }
-    wrcb p n (b:bs) = do { poke p b ; wrcb (p `plusPtr` 1) (n + 1) bs }
-
 -- Primary code for updating the virtual memory. Will update existing
--- content and append new content. Returns the global difference of 
--- reference counts between the old and new content. 
+-- content and append new content. Returns the difference of reference 
+-- counts between the old and new content (including zeroes for any
+-- addresses seen but whose reference counts do not change)
 --
 -- By combining the reference counting with this operation, we avoid
 -- two passes through memory (goal is to avoid unnecessary paging).
@@ -353,7 +328,7 @@ updateVirtualMemory vc txn allocStart fb =
 
     assertValidOldDeps allocStart rcOld -- sanity check
     let rcNew = Map.foldr' (addRefcts . snd) Map.empty fb
-    let rcDiff = Map.filter (/= 0) $ Map.unionWith (-) rcNew rcOld
+    let rcDiff = Map.unionWith (-) rcNew rcOld
 
     return $! rcDiff
 
