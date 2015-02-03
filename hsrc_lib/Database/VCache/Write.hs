@@ -263,7 +263,7 @@ updateReferenceCounts vc txn allocInit rcDiffMap =
     let updateCursor = compileWriteFlags [MDB_CURRENT]
     let updateRefct (addr,rcDiff) = 
             if (addr >= allocInit) then newAllocation addr rcDiff else 
-            if (rcDiff /= 0) then addrBug addr "invalid refct update" else
+            if (rcDiff == 0) then addrBug addr "filter zero refct updates" else
             poke pAddr addr >> -- prepare vAddr and pvAddr
             mdb_cursor_get' MDB_SET wrc pvAddr pvData >>= \ bOldRefct ->
             if (not bOldRefct) then clearOldZero addr rcDiff else
