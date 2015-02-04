@@ -65,15 +65,12 @@ isolate nBytes nRefs op = VGet $ \ s ->
                                   , vget_target = pF
                                   }
             in
-            _vget op s_isolated >>= \ r_isolated -> return $ 
-            case r_isolated of
-                VGetE emsg -> VGetE emsg
+            _vget op s_isolated >>= \ r_isolated -> case r_isolated of
+                VGetE emsg -> return (VGetE emsg)
                 VGetR r s' ->
-                    let bFullParse = (vget_target s' == pF)
-                                  && (L.null (vget_children s'))
-                    in
-                    if bFullParse then VGetR r s_postIsolate
-                                  else VGetE "isolate: did not parse all input"
+                    let bDone = vgetStateEmpty s' in
+                    if bDone then return (VGetR r s_postIsolate) else
+                    return (VGetE "isolate: did not parse all input")
 
 -- take exactly the requested amount from a list, or return Nothing.
 takeExact :: Int -> [a] -> Maybe ([a],[a])

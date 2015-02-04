@@ -3,7 +3,7 @@
 module Database.VCache.VGetAux 
     ( getWord8FromEnd
     , getWord8
-    , isEmpty
+    , isEmpty, vgetStateEmpty
     , getVarNat
     , getVarInt
     , consuming
@@ -44,11 +44,14 @@ peekByte = peek
 -- references nor values).
 isEmpty :: VGet Bool
 isEmpty = VGet $ \ s ->
-    let bEOF = (vget_target s == vget_limit s) 
-            && (L.null (vget_children s))
-    in
+    let bEOF = vgetStateEmpty s in
     bEOF `seq` return (VGetR bEOF s)
 {-# INLINE isEmpty #-}
+
+vgetStateEmpty :: VGetS -> Bool
+vgetStateEmpty s = (vget_target s == vget_limit s)
+                && (L.null (vget_children s))
+{-# INLINE vgetStateEmpty #-}
 
 -- | Get an integer represented in the Google protocol buffers zigzag
 -- 'varint' encoding, e.g. as produced by 'putVarInt'. 
