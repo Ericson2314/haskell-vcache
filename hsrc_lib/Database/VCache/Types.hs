@@ -130,9 +130,9 @@ data Cache a
 --   bit 0..4: heuristic weight, log scale
 --     weight = bytes + 80 * (deps + 1)
 --     log scale: 2^(N+7), max N=31
---   bits 5..6: timeout heuristic (log scale)
---   bit 7: marked 0 on each deref.
---   bits 8..15: for internal use by GC (e.g. timers).
+--   bits 5..6: heuristic priority 
+--   bit 7: touch; marked 0 on deref
+--   bits 8..15: for use by cache manager
 --
 
 
@@ -143,7 +143,9 @@ data Cache a
 -- priority.
 --
 -- The default for vref and deref is CacheMode1. Use of vrefc or 
--- derefc may indicate other modes. Cache mode will increase if
+-- derefc may indicate other modes. Cache mode is monotonic; if
+-- the same VRef is deref'd with two different modes, the higher
+-- mode will be preserved.
 --
 -- Note: Regardless of mode, a VRef that is fully GC'd from the
 -- Haskell layer will ensure any cached content is also GC'd.
