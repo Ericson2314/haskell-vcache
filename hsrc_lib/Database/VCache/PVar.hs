@@ -16,7 +16,6 @@ module Database.VCache.PVar
     , pvar_space
     ) where
 
-import Control.Monad
 import Control.Concurrent.STM
 import Database.VCache.Types
 import Database.VCache.Alloc (newPVar, newPVarIO, loadRootPVar, loadRootPVarIO)
@@ -27,25 +26,24 @@ readPVar :: PVar a -> VTx a
 readPVar pvar = 
     getVTxSpace >>= \ space ->
     if (space /= pvar_space pvar) then fail eBadSpace else
-    liftSTM $ liftM unRDV $ readTVar (pvar_data pvar)
+    liftSTM $ readTVar (pvar_data pvar) >>= \ rdv ->
+              case rdv of { (RDV v) -> return v }
 {-# INLINABLE readPVar #-}
+
+-- Note that readPVar and readPVarIO must be strict in RDV in order to force
+-- the initial, lazy read from the database, without otherwise. This is the
+-- only reason for RDV.
 
 -- | Read a PVar in the IO monad. 
 --
--- This is equivalent to:
---
--- > \ pv -> runVTx (pvar_space pv) (readPVar pv)
---
--- But the implementation is simply readTVarIO on the underlying
--- TVar. This operation can be relatively efficient compared to
--- performing a full transaction.
+-- This is more efficient than a full transaction. It simply peeks at
+-- the underlying TVar with readTVarIO. Durability of the value read
+-- is not guaranteed. 
 readPVarIO :: PVar a -> IO a
-readPVarIO = liftM unRDV . readTVarIO . pvar_data
+readPVarIO pv = 
+    readTVarIO (pvar_data pv) >>= \ rdv ->
+    case rdv of { (RDV v) -> return v }
 {-# INLINE readPVarIO #-}
-
-unRDV :: RDV a -> a
-unRDV (RDV a) = a
-{-# INLINABLE unRDV #-}
 
 eBadSpace :: String
 eBadSpace = "VTx: mismatch between VTx VSpace and PVar VSpace"
