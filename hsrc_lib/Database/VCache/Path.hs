@@ -23,15 +23,16 @@ maxPathLen = 511  -- key size limit from LMDB 0.9.10
 -- the same as "foobar". Separators are left to local conventions.
 -- Consider "foo/" and "bar/" to model filesystem subdirectories. 
 --                 
--- Paths have a limited maximum depth of ~500 bytes. In practice, this
--- should not be an issue. Oversized paths result in an error message,
--- or Nothing for the vcacheSubdirM variant.
+-- Paths have a limited maximum size of ~500 bytes, including the
+-- final PVar name. A runtime error may be generated for oversized
+-- paths. In practice, this should not be an issue. 
 --
--- Application organization should be modeled using data structures 
--- within few toplevel PVars. Shifting logic into data structures is
--- advantageous for versioning, flexibility, type safety, and GC. The
--- toplevel filesystem metaphor is convenient for extensibility and 
--- modularity, but isn't an optimal first choice.
+-- Usage Note: Subdirectories allow developers to control risk of
+-- namespace collisions between modules or plugins. But they are not
+-- intended for domain data! Avoid dynamically creating directories
+-- or named PVars based on runtime data. It's better to push most
+-- domain logic and schema into the PVar layer, which is subject to
+-- rich type safety, GC, potential versioning, and other benefits.
 --
 vcacheSubdir :: ByteString -> VCache -> VCache
 vcacheSubdir p (VCache vs d) = 

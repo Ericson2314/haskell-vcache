@@ -93,6 +93,10 @@ vcRootPath = BS.singleton 47
 vcAllocStart :: Address 
 vcAllocStart = 999999999
 
+-- Default cache size is somewhat arbitrary. I've chosen to set it
+-- to ten megabytes (as documented in the Cache module). 
+vcDefaultCacheLimit :: Int
+vcDefaultCacheLimit = 10 * 1024 * 1024 
 
 openVC' :: Int -> FileLock -> FilePath -> IO VCache
 openVC' nBytes fl fp = do
@@ -120,6 +124,8 @@ openVC' nBytes fl fp = do
         memPVars <- newIORef Map.empty
         tvWrites <- newTVarIO (Writes Map.empty [])
         mvSignal <- newMVar () 
+        cLimit <- newIORef vcDefaultCacheLimit
+        cSize <- newIORef 0
         rwLock <- newRWLock
 
         -- Realistically, we're unlikely GC our VCache before the
@@ -146,6 +152,8 @@ openVC' nBytes fl fp = do
                     , vcache_signal = mvSignal
                     , vcache_writes = tvWrites
                     , vcache_rwlock = rwLock
+                    , vcache_c_limit = cLimit
+                    , vcache_c_size = cSize
                     }
                 }
 

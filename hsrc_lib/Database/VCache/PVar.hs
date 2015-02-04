@@ -13,6 +13,7 @@ module Database.VCache.PVar
     , swapPVar
     , unsafePVarAddr
     , unsafePVarRefct
+    , pvar_space
     ) where
 
 import Control.Monad

@@ -8,7 +8,7 @@ module Database.VCache.Types
     , PVar(..), RDV(..)
     , PVEph(..), PVEphMap
     , VTx(..), VTxState(..), TxW(..), VTxBatch(..)
-    , VCache(..), VSpace(..), VCacheStats(..)
+    , VCache(..), VSpace(..)
     , VPut(..), VPutS(..), VPutR(..)
     , PutChild(..), putChildAddr
     , VGet(..), VGetS(..), VGetR(..)
@@ -24,7 +24,7 @@ module Database.VCache.Types
     , markForWrite
     , liftSTM
 
-    , mkVRefCache, cacheWeight
+    , mkVRefCache, cacheWeight, cacheModeBits, touchCache
     ) where
 
 import Data.Bits
@@ -125,32 +125,56 @@ data Cache a
         = NotCached 
         | Cached a {-# UNPACK #-} !Word16
 
-data CacheMode
-        = CacheMode0 -- short timeout
-        | CacheMode1 -- medium timeout
-        | CacheMode2 -- long timeout
-        | CacheMode3 -- maximum timeout
-
 --
 -- cache bitfield for mode:
 --   bit 0..4: heuristic weight, log scale
 --     weight = bytes + 80 * (deps + 1)
---     log scale: 2^(N+8), max N=31
+--     log scale: 2^(N+7), max N=31
 --   bits 5..6: timeout heuristic (log scale)
 --   bit 7: marked 0 on each deref.
 --   bits 8..15: for internal use by GC (e.g. timers).
 --
 
+
+-- | Cache modes are used when deciding, heuristically, whether to
+-- clear a value from cache. The modes don't have precise meaning,
+-- but there is a general intention: higher numbered modes indicate
+-- that VCache should hold onto a value for longer or with greater
+-- priority.
+--
+-- The default for vref and deref is CacheMode1. Use of vrefc or 
+-- derefc may indicate other modes. Cache mode will increase if
+--
+-- Note: Regardless of mode, a VRef that is fully GC'd from the
+-- Haskell layer will ensure any cached content is also GC'd.
+-- 
+data CacheMode
+        = CacheMode0
+        | CacheMode1
+        | CacheMode2
+        | CacheMode3
+        deriving (Eq, Ord, Show)
+
+cacheModeBits :: CacheMode -> Word16
+cacheModeBits CacheMode0 = 0
+cacheModeBits CacheMode1 = 1 `shiftL` 5
+cacheModeBits CacheMode2 = 2 `shiftL` 5
+cacheModeBits CacheMode3 = 3 `shiftL` 5
+
+
+-- | clear bit 7, and adjust cache mode monotonically.
+touchCache :: CacheMode -> Word16 -> Word16
+touchCache cm w =
+    let cb' = (w .&. 0x60) `max` cacheModeBits cm in
+    (w .&. 0xff1f) .|. cb'
+{-# INLINE touchCache #-}
+
 -- | mkVRefCache val weight
 mkVRefCache :: a -> Int -> CacheMode -> Cache a
 mkVRefCache val w cm = Cached val cw where
-    cw = m .|. cs 0 256
-    cs r k = if ((k > w) || (r > 30)) then r else cs (r+1) (k*2)
-    m = case cm of
-            CacheMode0 -> 0
-            CacheMode1 -> 1 `shiftL` 5
-            CacheMode2 -> 2 `shiftL` 5
-            CacheMode3 -> 3 `shiftL` 5
+    cw = m .|. cs 0 128
+    cs r k = if ((k > w) || (r == 0x1f)) then r else cs (r+1) (k*2)
+    m = cacheModeBits cm
 
 -- | cacheWeight nBytes nDeps
 cacheWeight :: Int -> Int -> Int
@@ -244,12 +268,23 @@ data VSpace = VSpace
     , vcache_db_caddrs  :: {-# UNPACK #-} !MDB_dbi' -- hashval → [address]
     , vcache_db_refcts  :: {-# UNPACK #-} !MDB_dbi' -- address → Word64
     , vcache_db_refct0  :: {-# UNPACK #-} !MDB_dbi' -- address → ()
-    , vcache_mem_vrefs  :: !(IORef EphMap) -- track VRefs in memory
-    , vcache_mem_pvars  :: !(IORef PVEphMap) -- track PVars in memory
+
     , vcache_allocator  :: !(IORef Allocator) -- allocate new VRefs and PVars
     , vcache_signal     :: !(MVar ()) -- signal writer that work is available
     , vcache_writes     :: !(TVar Writes) -- STM layer PVar writes
     , vcache_rwlock     :: !RWLock -- replace gap left by MDB_NOLOCK
+
+
+    , vcache_mem_vrefs  :: !(IORef EphMap) -- track VRefs in memory
+    , vcache_mem_pvars  :: !(IORef PVEphMap) -- track PVars in memory
+
+    , vcache_c_limit    :: !(IORef Int) -- weight limit
+    , vcache_c_size     :: !(IORef Int) -- estimated current size (for stats)
+    
+
+    -- Still needed:
+    --  data for GC guidance
+    --  data for cache guidance
 
     -- requested weight limit for cached values
     -- , vcache_weightlim  :: {-# UNPACK #-} !(IORef Int)
@@ -350,20 +385,6 @@ withByteStringVal (BSI.PS fp off len) action = withForeignPtr fp $ \ p ->
     action $ MDB_val { mv_size = fromIntegral len
                      , mv_data = p `plusPtr` off }
 {-# INLINE withByteStringVal #-}
-
--- | Miscellaneous statistics for a VCache instance. These can be 
--- computed at runtime, though they aren't guaranteed to be atomic
--- or consistent. 
-data VCacheStats = VCacheStats
-        { vcstat_file_size      :: {-# UNPACK #-} !Int  -- ^ estimated database file size (in bytes)
-        , vcstat_vref_count     :: {-# UNPACK #-} !Int  -- ^ number of immutable values in the database
-        , vcstat_pvar_count     :: {-# UNPACK #-} !Int  -- ^ number of mutable PVars in the database
-        , vcstat_root_count     :: {-# UNPACK #-} !Int  -- ^ number of named roots (a subset of PVars)
-        , vcstat_mem_vref       :: {-# UNPACK #-} !Int  -- ^ number of VRefs in Haskell process memory
-        , vcstat_mem_pvar       :: {-# UNPACK #-} !Int  -- ^ number of PVars in Haskell process memory
-        , vcstat_alloc_pos      :: {-# UNPACK #-} !Address -- ^ address to be used by allocator
-        } deriving (Show, Ord, Eq)
-
 
 -- | The VTx transactions allow atomic updates to both PVars from 
 -- one VSpace and arbitrary STM resources (TVars, TArrays, and so

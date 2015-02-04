@@ -170,21 +170,36 @@ allocPVarVTx ac =
     let ac' = ac { alloc_new_addr = 2 + newAddr } in
     (ac', pvAddr)
    
--- | Construct a VRef and cache the value (if new)
+-- | Construct a VRef then initialize the cache. 
+-- Or touch the cache if it already exists.
 newVRefIO :: (VCacheable a) => VSpace -> a -> CacheMode -> IO (VRef a)
 newVRefIO vc v cm =
     runVPutIO vc (put v) >>= \ ((), _data, _deps) ->
     allocVRefIO vc _data _deps >>= \ addr ->
     let w = cacheWeight (BS.length _data) (L.length _deps) in
-    let c0 = mkVRefCache v w cm in
-    addr2vref vc addr c0
+    addr2vref vc addr >>= \ vref ->
+    initVRefCache vref v w cm >>= \ () ->
+    return vref
+{-# NOINLINE newVRefIO #-}
+
+initVRefCache :: VRef a -> a -> Int -> CacheMode -> IO ()
+initVRefCache vref v w cm = atomicModifyIORef (vref_cache vref) $ \ c -> case c of
+    NotCached -> 
+        let c' = mkVRefCache v w cm in
+        c' `seq` (c', ())
+    Cached r b ->
+        let b' = touchCache cm b in
+        let c' = Cached r b' in
+        c' `seq` (c', ())
+{-# INLINABLE initVRefCache #-}
 
 -- | Construct a VRef with initially empty cache (if new)
 newVRefIO' :: (VCacheable a) => VSpace -> a -> IO (VRef a)
 newVRefIO' vc v = 
     runVPutIO vc (put v) >>= \ ((), _data, _deps) ->
     allocVRefIO vc _data _deps >>= \ addr ->
-    addr2vref vc addr NotCached
+    addr2vref vc addr 
+{-# INLINABLE newVRefIO' #-}
 
 -- | Match existing structure in database. If not found, allocate one.
 allocVRefIO :: VSpace -> ByteString -> [PutChild] -> IO Address
@@ -203,6 +218,7 @@ allocVRefIO vc _data _deps =
             atomicModifyIORef acRef allocFn >>= \ addr ->
             signalAlloc vc >> 
             return addr
+{-# NOINLINE allocVRefIO #-}
    
 seek :: (Monad m) => (a -> m (Maybe b)) -> [a] -> m (Maybe b)
 seek _ [] = return Nothing
@@ -232,7 +248,7 @@ matchCandidate vc txn vData vCandidateAddr = do
     case mbR of
         Nothing -> -- this should not happen
             peekAddr vCandidateAddr >>= \ addr ->
-            fail $ "VCache corrupt: undefined address " 
+            fail $ "VCache bug: undefined address " 
                     ++ show addr ++ " in hashmap" 
         Just vData' ->
             let bSameSize = mv_size vData == mv_size vData' in
@@ -245,13 +261,15 @@ withCursor' :: MDB_txn -> MDB_dbi' -> (MDB_cursor' -> IO a) -> IO a
 withCursor' txn dbi = bracket g d where
     g = mdb_cursor_open' txn dbi
     d = mdb_cursor_close'
+{-# INLINABLE withCursor' #-}
 
 peekAddr :: MDB_val -> IO Address
 peekAddr v =
     let expectedSize = fromIntegral (sizeOf (undefined :: Address)) in
     let bBadSize = expectedSize /= mv_size v in
-    if bBadSize then fail "corrupt database: badly formed address in hashmap" else
+    if bBadSize then fail "VCache bug: badly formed address in hashmap" else
     peekAligned (castPtr (mv_data v))
+{-# INLINABLE peekAddr #-}
 
 -- allocate a VRef. This will also search the recently allocated addresses for
 -- a potential match in case an identical VRef was very recently allocated!

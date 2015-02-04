@@ -41,7 +41,7 @@ VCache does not support concurrent instances and mustn't be used for inter-proce
 
 VCache doesn't enforce any type versioning features comparable to the `SafeCopy` class used by acid-state. Developers should either ensure backwards compatibility by hand (e.g. by including type version information for unstable types) or develop a variation of SafeCopy for VCache.
 
-Transactions use optimistic concurrency. While this has many advantages, a stream of short transactions may starve a long running read-write transaction. Where heavy contention is anticipated or observed, developers should utilize external synchronization or cooperation patterns to reduce conflict, such as queues and channels and so on. 
+Transactions use optimistic concurrency. While this has many advantages, a stream of short transactions may starve a long running transaction. Where heavy contention is anticipated or observed, developers should utilize external synchronization or cooperation patterns to reduce conflict, such as queues and channels. 
 
 LMDB is memory mapped, and thus is limited by address space. To be used effectively, LMDB requires an address space much larger than available memory.
 

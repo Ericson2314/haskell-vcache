@@ -1,18 +1,14 @@
 
 
 module Database.VCache
-    ( VRef, vref, vref', deref, deref'
-    , PVar, newPVar, newPVarIO
-    , readPVar, readPVarIO, writePVar
-    , modifyPVar, modifyPVar', swapPVar
-    , VTx, runVTx, liftSTM, markDurable
+    ( module Database.VCache.VRef
+    , module Database.VCache.PVar
+    , module Database.VCache.VTx
     , VCache, openVCache
-    , loadRootPVar, loadRootPVarIO
-    , vcacheSubdir, vcacheSubdirM
-    , vcacheStats, vcacheSync
-    , VSpace, vcache_space, vref_space, pvar_space
-    , unsafeVRefAddr, unsafeVRefRefct
-    , unsafePVarAddr, unsafePVarRefct
+    , VSpace, vcache_space
+    , module Database.VCache.Path
+    , module Database.VCache.Stats
+    , module Database.VCache.Sync 
     , module Database.VCache.VCacheable
     ) where
 

@@ -21,12 +21,11 @@ import Database.VCache.Types
 import Database.VCache.Read
 -- import Database.VCache.RWLock
 
--- | Obtain a VRef given an address and value. The given address will
--- not be cached initially.
-addr2vref :: (VCacheable a) => VSpace -> Address -> Cache a -> IO (VRef a)
-addr2vref space addr ini = 
+-- | Obtain a VRef given an address and value. Not initially cached.
+addr2vref :: (VCacheable a) => VSpace -> Address -> IO (VRef a)
+addr2vref space addr = 
     if not (isVRefAddr addr) then fail ("invalid VRef address " ++ show addr) else
-    loadMemCache undefined space addr ini >>= \ cache ->
+    loadMemCache undefined space addr >>= \ cache ->
     return $! VRef 
         { vref_addr  = addr
         , vref_cache = cache
@@ -36,8 +35,8 @@ addr2vref space addr ini =
 {-# INLINABLE addr2vref #-}
 
 -- | Load or Create the cache for a given location and type.
-loadMemCache :: (Typeable a) => a -> VSpace -> Address -> Cache a -> IO (IORef (Cache a))
-loadMemCache _dummy space addr ini = atomicModifyIORef mcrf loadCache where
+loadMemCache :: (Typeable a) => a -> VSpace -> Address -> IO (IORef (Cache a))
+loadMemCache _dummy space addr = atomicModifyIORef mcrf loadCache where
     mcrf = vcache_mem_vrefs space
     typa = typeOf _dummy
     getCache = unsafeDupablePerformIO . Weak.deRefWeak . _unsafeEphWeak
@@ -45,7 +44,7 @@ loadMemCache _dummy space addr ini = atomicModifyIORef mcrf loadCache where
     loadCache mc = case find mc of
         Just c -> (mc, c)
         Nothing -> unsafePerformIO $ do
-            c <- newIORef ini
+            c <- newIORef NotCached
             wc <- mkWeakIORef c (return ())
             let eph = Eph { eph_addr = addr, eph_type = typa, eph_cache = wc }
             let mc' = addEph eph mc

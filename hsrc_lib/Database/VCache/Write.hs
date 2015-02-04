@@ -28,11 +28,12 @@ import qualified System.IO as Sys
 import qualified System.Exit as Sys
 
 import Database.LMDB.Raw
-import Database.VCache.Types
-import Database.VCache.VPutFini
-import Database.VCache.VGetInit
-import Database.VCache.RWLock
-import Database.VCache.Refct
+import Database.VCache.Types 
+import Database.VCache.VPutFini -- serialize updated PVars
+import Database.VCache.VGetInit -- read dependencies to manage refcts
+import Database.VCache.RWLock -- need a writer lock
+import Database.VCache.Refct  -- to update reference counts
+import Database.VCache.Clean  -- GC and Cache management
 
 -- a write batch records, for each address, both some content 
 -- and a list of addresses to incref
@@ -53,6 +54,7 @@ initWriterThreads :: VSpace -> IO ()
 initWriterThreads vc = begin where
     begin = do
         task (writerStep vc)
+        task (cleanCache vc)
     task step = void (forkIO (forever step `catch` onE))
     onE :: SomeException -> IO ()
     onE e | isBlockedOnMVar e = return () -- full GC of VCache
@@ -359,14 +361,6 @@ readDataDeps vc addr vData = _vget vgetInit state0 >>= toDeps where
         , vget_limit = mv_data vData `plusPtr` fromIntegral (mv_size vData)
         , vget_space = vc
         }
-
-runGarbageCollector :: VSpace -> MDB_txn -> Address -> IO ()
-runGarbageCollector vc txn allocInit =
-    putErrLn "VCache TODO: garbage collection"
-
-
-
-
 
 -- How many threads?
 --

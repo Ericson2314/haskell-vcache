@@ -2,38 +2,38 @@
 
 module Database.VCache.VRef
     ( VRef
-    , vref, vref'
-    , deref, deref'
+    , vref, vref', vrefc
+    , deref, deref', derefc
     , unsafeVRefAddr
     , unsafeVRefRefct
+    , vref_space
+    , clearVRef
+    , CacheMode(..)
     ) where
 
 import Control.Monad
-import Data.Bits
 import Data.IORef
 import System.IO.Unsafe 
 import Database.VCache.Types
 import Database.VCache.Alloc
 import Database.VCache.Read
 
--- | Construct a VRef for a cacheable value. This will search for a
--- matching value on disk (for structure sharing) and otherwise will
--- arrange for the value to be written to disk. 
+-- | Construct a reference with the cache initially active, i.e.
+-- such that immediate deref can access the value without reading
+-- from the database. The given value will be placed in the cache
+-- unless the same vref has already been constructed.
 vref :: (VCacheable a) => VSpace -> a -> VRef a
-vref vc v = unsafePerformIO (newVRefIO vc v CacheMode1)
-{-# INLINABLE vref #-}
+vref = vrefc CacheMode1 
+{-# INLINE vref #-}
 
--- | The normal vref constructor will cache the value, using heuristic
--- timeouts and weight metrics to decide when to remove the value from
--- cache. Each subsequent deref will extend the timeout. 
---
--- While this behavior is useful in many cases (especially when updating
--- B-trees or map-like data structures), there are cases where developers
--- know they will not deref the value in the near future, or where they
--- cannot afford to hold onto large values and must shunt them to disk 
--- ASAP. In these cases, the vref' constructor or deref' accessor allow
--- developers to bypass the caching behavior.
---
+-- | Construct a VRef with an alternative cache control mode. 
+vrefc :: (VCacheable a) => CacheMode -> VSpace -> a -> VRef a
+vrefc cm vc v = unsafePerformIO (newVRefIO vc v cm)
+{-# INLINABLE vrefc #-}
+
+-- | In some cases, developers can reasonably assume they won't need a 
+-- value in the near future. In these cases, use the vref' constructor
+-- to allocate a VRef without caching the content. 
 vref' :: (VCacheable a) => VSpace -> a -> VRef a
 vref' vc v = unsafePerformIO (newVRefIO' vc v)
 {-# INLINABLE vref' #-}
@@ -44,29 +44,42 @@ readVRef v = readAddrIO (vref_space v) (vref_addr v) (vref_parse v)
 
 -- | Dereference a VRef, obtaining its value. If the value is not in
 -- cache, it will be read into the database then cached. Otherwise, 
--- the value is read from cache and any expiration timer is reset.
+-- the value is read from cache and the cache is touched to restart
+-- any expiration.
 --
 -- Assuming a valid VCacheable instance, this operation should return
--- an equivalent value as used to construct the VRef.
+-- an equivalent value as was used to construct the VRef.
 deref :: VRef a -> a
-deref v = unsafeDupablePerformIO $
+deref = derefc CacheMode1
+{-# INLINE deref #-}
+
+-- | Dereference a VRef with an alternative cache control mode.
+derefc :: CacheMode -> VRef a -> a
+derefc cm v = unsafeDupablePerformIO $
     unsafeInterleaveIO (readVRef v) >>= \ lazy_read_rw ->
     atomicModifyIORef (vref_cache v) $ \ c -> case c of
         Cached r w -> 
-            -- clear bit 7: signal GC of cache use
-            let w' = w .&. complement 0x80 in
+            let w' = touchCache cm w in
             let c' = Cached r w' in 
             c' `seq` (c',r)
         NotCached ->
             let (r,w) = lazy_read_rw in
-            let c' = mkVRefCache r w CacheMode1 in
+            let c' = mkVRefCache r w cm in
             c' `seq` (c',r)
-{-# NOINLINE deref #-}
+{-# NOINLINE derefc #-}
 
--- | Dereference a VRef. Will use the cached value if available, but
--- will not cache the value or reset any expiration timers. This can
--- be useful when processing large values, since it can limit how long
--- those values remain in memory.
+-- For the moment, I'm just using CacheMode1. I reserved space for
+-- cache modes, but I'm uncertain how I should expose them to users
+-- and what they should do exactly, other than maybe tweak timeouts.
+
+-- | Dereference a VRef. This will read from the cache if the value
+-- is available, but will not update the cache. If the value is not
+-- cached, it will be read instead from the persistence layer.
+--
+-- This can be useful if you know you'll only dereference a value 
+-- once for a given task, or if the datatype involved is cheap to
+-- parse (e.g. simple bytestrings) such that there isn't a strong
+-- need to cache the parse result.
 deref' :: VRef a -> a
 deref' v = unsafePerformIO $ 
     readIORef (vref_cache v) >>= \ c -> case c of
@@ -103,4 +116,18 @@ unsafeVRefAddr = vref_addr
 -- should be considered an unstable element of the API.
 unsafeVRefRefct :: VRef a -> IO Int
 unsafeVRefRefct v = readRefctIO (vref_space v) (vref_addr v) 
+{-# INLINE unsafeVRefRefct #-}
+
+-- | Immediately clear the cache associated with a VRef, allowing 
+-- any contained data to be GC'd. 
+--
+-- If developers don't clear the cache explicitly, it will usually
+-- be cleared either by a background thread or when the VRef itself
+-- is garbage collected by the Haskell process. In most cases, it is
+-- better to leave the cache management to these implicit processes.
+clearVRef :: VRef a -> IO ()
+clearVRef v = writeIORef (vref_cache v) NotCached
+{-# INLINE clearVRef #-}
+
+
 
