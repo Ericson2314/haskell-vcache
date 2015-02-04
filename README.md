@@ -17,7 +17,7 @@ A **PVar** is a reference to a mutable variable which contains a value. Operatio
 
 Values in VCache must be serializable into binary strings, VRefs, and PVars. VCache has a reference-counting garbage collector to remove unused VRefs and PVars. Persistence is supported by named root PVars, which are essentially global persistent variables that will not be GC'd. Holding a VRef or PVar in Haskell process is also sufficient to prevent garbage collection.
 
-VCache is backed by LMDB, a memory-mapped key value store that is known empirically to scale to at least a few terabytes. Theoretically, it could scale to a few exabytes, but you're likely to shard and distribute your app long before you reach that limit. While LMDB is read-optimized, VCache mitigates write performance concerns by batching multiple STM-layer transactions into one LMDB-layer update and writing sequentially within each database. 
+VCache is backed by LMDB, a memory-mapped key value store that is known empirically to scale to at least a few terabytes. Theoretically, it could scale to a few exabytes, but you're likely to shard and distribute your app long before you reach that limit. While LMDB is read-optimized, VCache mitigates write performance concerns by batching multiple STM-layer transactions into one LMDB-layer update and writing sequentially within each database.
 
 Compare and Contrast
 --------------------
@@ -43,4 +43,4 @@ VCache is not a database. Features for search, query, query optimization, index,
 
 This package does not provide the datatypes to make VCache especially useful. Container types - B-trees, tries, finger-trees, ropes, arrays, hashmaps, etc. - implemented leveraging VRefs type would make it a lot easier to pick up and use VCache. This package does not provide type versioning. A variation of SafeCopy for the VCacheable instance may be a worthy investment, but is not a major priority at this time.
 
-Cyclic data structures are problematic for reference counting GC. Developers are permitted to model cyclic structures using PVars. However, they must be careful to break cycles when finished, otherwise they may leak space at the persistence layer.
+Cyclic data structures are problematic for reference counting GC. Developers are permitted to model cyclic structures using PVars. However, they must be careful to break cycles when finished or they will leak space at the persistence layer. This isn't an especially difficult burden, but it's one more concern to keep in mind.
