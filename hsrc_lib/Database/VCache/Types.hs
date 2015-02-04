@@ -14,7 +14,7 @@ module Database.VCache.Types
     , VGet(..), VGetS(..), VGetR(..)
     , VCacheable(..)
     , Allocator(..), AllocFrame(..), Allocation(..)
-    , Writes(..), WriteLog
+    , Writes(..), WriteLog, WriteCt(..)
 
     -- a few utilities
     , allocFrameSearch
@@ -186,10 +186,10 @@ cacheWeight nBytes nDeps = nBytes + (80 * (nDeps + 1))
 -- though named root PVars provide a basis for persistence.
 --
 -- When loaded from disk, PVar contents are lazily read into Haskell
--- memory when first needed. PVar contents are not cached; the only
--- way to release content associated with the PVar is to allow all
--- instances of the PVar be GC'd from the Haskell layer, after which
--- the PVar might again be lazily loaded.
+-- memory when first needed. PVar contents are not cached, i.e. they
+-- will remain in Haskell memory for as long as the PVar does. If a
+-- PVar is fully GC'd from the Haskell layer, it may again be lazily
+-- loaded.
 --
 -- It is not the case that every write to a PVar results in a write to
 -- disk: if a PVar is updated at a higher frequency than the writer
@@ -280,14 +280,18 @@ data VSpace = VSpace
 
     , vcache_c_limit    :: !(IORef Int) -- weight limit
     , vcache_c_size     :: !(IORef Int) -- estimated current size (for stats)
-    
+
+    -- Signal writes mostly exists to prevent GC of PVars until after 
+    -- any updated PVars are durable. I also use it to maintain stats. :)
+    , vcache_signal_writes :: !(Writes -> IO ()) -- signal durable writes
+    , vcache_ct_writes  :: !(IORef WriteCt) -- (stat) information about writes
+
+    , vcache_alloc_init :: {-# UNPACK #-} !Address -- (for stats) initial allocator on open
+
 
     -- Still needed:
     --  data for GC guidance
     --  data for cache guidance
-
-    -- requested weight limit for cached values
-    -- , vcache_weightlim  :: {-# UNPACK #-} !(IORef Int)
 
     -- share persistent variables for safe STM
 
@@ -441,27 +445,32 @@ markForWrite pv a = VTx $ modify $ \ vtx ->
     vtx { vtx_writes = writes' }
 {-# INLINE markForWrite #-}
 
+
+
+
+
+
+
 type WriteLog  = Map Address TxW
 data TxW = forall a . TxW !(PVar a) a
+    -- Note: I can either record just the PVar, or the PVar and its value.
+    -- The latter is favorable because it avoids risk of creating very large
+    -- transactions in the writer thread (i.e. to read the updated PVars),
+    -- and thus reduces risk of starvation.
+
 data Writes = Writes 
     { write_data :: !WriteLog
     , write_sync :: ![MVar ()]
     }
+data WriteCt = WriteCt
+    { wct_frames :: {-# UNPACK #-} !Int -- how many write frames
+    , wct_pvars  :: {-# UNPACK #-} !Int -- how many PVars written
+    , wct_sync   :: {-# UNPACK #-} !Int -- how many sync requests
+    }
 
--- Note on TxW: I have two options here. Either I can record just
--- the PVar to which I write, then read the PVar in the writer 
--- thread later on, or I can record both the PVar and the value
--- written, and keep the most recent instance for each write based
--- on transaction serialization.
---
--- In the normal case, both should be about the same. But I think,
--- in the worst case scenario, the first option might have unstable
--- emergent behavior: if we're asked to write 40000 variables, we 
--- must first try to read them; if the transaction fails because
--- some have changed, then we'll need to read all of them again,
--- and maybe a few more. The second option, meanwhile, requires 
--- reading only one variable in the writer thread no matter what.
---
+
+
+
 -- So for now, I'm keeping the value written redundantly in the
 -- TxW so that I don't need to read the PVars in the writer thread.
 --

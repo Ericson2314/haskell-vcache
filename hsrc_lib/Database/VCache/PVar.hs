@@ -31,8 +31,8 @@ readPVar pvar =
 {-# INLINABLE readPVar #-}
 
 -- Note that readPVar and readPVarIO must be strict in RDV in order to force
--- the initial, lazy read from the database, without otherwise. This is the
--- only reason for RDV.
+-- the initial, lazy read from the database. This is the only reason for RDV.
+-- Without forcing here, a lazy read might return a value from an update.
 
 -- | Read a PVar in the IO monad. 
 --

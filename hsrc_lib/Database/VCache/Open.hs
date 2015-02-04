@@ -126,6 +126,7 @@ openVC' nBytes fl fp = do
         mvSignal <- newMVar () 
         cLimit <- newIORef vcDefaultCacheLimit
         cSize <- newIORef 0
+        ctWrites <- newIORef $ WriteCt 0 0 0
         rwLock <- newRWLock
 
         -- Realistically, we're unlikely GC our VCache before the
@@ -154,6 +155,9 @@ openVC' nBytes fl fp = do
                     , vcache_rwlock = rwLock
                     , vcache_c_limit = cLimit
                     , vcache_c_size = cSize
+                    , vcache_signal_writes = updWriteCt ctWrites
+                    , vcache_ct_writes = ctWrites
+                    , vcache_alloc_init = allocStart
                     }
                 }
 
@@ -185,3 +189,10 @@ freshAllocator addr =
     let f0 = AllocFrame Map.empty Map.empty addr in
     Allocator addr f0 f0 f0
 
+-- Update write counts.
+updWriteCt :: IORef WriteCt -> Writes -> IO ()
+updWriteCt var w = modifyIORef' var $ \ wct ->
+    let frmCt = 1 + wct_frames wct in
+    let pvCt = wct_pvars wct + Map.size (write_data w) in
+    let synCt = wct_sync wct + L.length (write_sync w) in
+    WriteCt { wct_frames = frmCt, wct_pvars = pvCt, wct_sync = synCt }

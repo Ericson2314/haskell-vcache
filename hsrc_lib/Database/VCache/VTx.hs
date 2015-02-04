@@ -4,6 +4,8 @@ module Database.VCache.VTx
     , runVTx
     , liftSTM
     , markDurable
+    , markDurableIf
+    , getVTxSpace
     ) where
 
 import Control.Monad 
@@ -70,4 +72,14 @@ markDurable :: VTx ()
 markDurable = VTx $ modify $ \ vtx -> 
     vtx { vtx_durable = True }
 {-# INLINE markDurable #-}
+
+-- | This variation of markDurable makes it easier to short-circuit
+-- complex computations to decide durability. `markDurableIf False`
+-- does not affect durability. If durability is already marked, the
+-- boolean is not evaluated.
+markDurableIf :: Bool -> VTx ()
+markDurableIf b = VTx $ modify $ \ vtx -> 
+    let bDurable = vtx_durable vtx || b in
+    vtx { vtx_durable = bDurable }
+{-# INLINE markDurableIf #-}
 

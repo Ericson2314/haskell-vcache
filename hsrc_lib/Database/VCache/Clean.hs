@@ -8,6 +8,7 @@ module Database.VCache.Clean
 
 import Control.Monad
 import qualified Data.Map.Strict as Map
+import Control.Concurrent
 import Control.Concurrent.STM
 
 import Database.LMDB.Raw
@@ -26,7 +27,8 @@ import Database.VCache.Types
 -- 
 --  * stop on vcache_signal if there isn't enough to do
 --  * signal the writer to run GC or clear allocators
---  * limit frequency, e.g. to 20-50Hz
+--  * limit frequency, though potentially adaptive to
+--    rate at which objects are added?
 --
 cleanCache :: VSpace -> IO ()
 cleanCache vc = do
@@ -35,12 +37,22 @@ cleanCache vc = do
 
 -- sleep for a number of microseconds
 usleep :: Int -> IO ()
+usleep = threadDelay
+{-# INLINE usleep #-}
+
+-- Alternative usleep:
+{- 
+usleep :: Int -> IO ()
 usleep n = do
     rd <- registerDelay n
     atomically $ do
         b <- readTVar rd
         unless b retry
 {-# INLINE usleep #-}
+-}
+-- I've had some bad experiences with threadDelay causing space leaks. 
+-- But maybe it has been fixed? I'll need to check it out later.
+
 
 runGarbageCollector :: VSpace -> MDB_txn -> Address -> IO ()
 runGarbageCollector vc txn allocInit =

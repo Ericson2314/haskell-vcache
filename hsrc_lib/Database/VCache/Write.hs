@@ -108,6 +108,10 @@ writerStep vc = withRWLock (vcache_rwlock vc) $ do
     mdb_txn_commit txn
     mapM_ syncSignal (write_sync ws)
 
+    -- Report durable writes, e.g. for stats. 
+    -- Also, prevents GC of PVars until after commit.
+    vcache_signal_writes vc ws
+
 isNewRoot :: Allocation -> Bool
 isNewRoot an = isPVarAddr (alloc_addr an) && not (BS.null (alloc_name an))
 
@@ -119,7 +123,6 @@ takeWrites tv = do
 
 seralizeWrites :: WriteLog -> IO WriteBatch
 seralizeWrites = Map.traverseWithKey (const writeTxW)
-{-# INLINE seralizeWrites #-}
 
 writeTxW :: TxW -> IO WriteCell
 writeTxW (TxW pv v) =
@@ -132,7 +135,6 @@ fnWriteAlloc an = _wdd (alloc_data an) (alloc_deps an)
 _wdd :: ByteString -> [PutChild] -> WriteCell
 _wdd _data _deps = (_data, _addr) where
     _addr = fmap putChildAddr _deps
-{-# INLINE _wdd #-}
 
 -- Reviewing safety one more time:
 --
@@ -170,7 +172,6 @@ allocFrameStep ac =
 
 syncSignal :: MVar () -> IO ()
 syncSignal mv = void (tryPutMVar mv ())
-
 
 -- Write the PVar roots and VRef hashmap. In these cases, the address
 -- is the data, and a bytestring (a path or hash) is the key. I'm using
