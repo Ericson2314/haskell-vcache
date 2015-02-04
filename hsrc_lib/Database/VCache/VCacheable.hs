@@ -1,4 +1,5 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE BangPatterns #-}
 
 module Database.VCache.VCacheable
     ( VCacheable(..)
@@ -11,7 +12,6 @@ import Control.Monad
 
 import Data.Word
 import Data.Char
-import qualified Data.List as L
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 
@@ -92,14 +92,31 @@ instance (VCacheable a, VCacheable b) => VCacheable (Either a b) where
     put (Left a) = putWord8 (fromIntegral (ord 'L')) >> put a
     put (Right b) = putWord8 (fromIntegral (ord 'R')) >> put b
 
+-- NOTE: lists are stored in *reverse* order, such that when read
+-- the nodes can be directly constructed into normal order without
+-- reversing the list, i.e. thus optimizing for read.
 instance (VCacheable a) => VCacheable [a] where
-    get = 
-        do nCount <- liftM fromIntegral getVarNat
-           replicateM nCount get
-    put ls = 
-        do let nCount = L.length ls 
-           putVarNat (fromIntegral nCount)
-           mapM_ put ls
+    get = do
+        nCount <- liftM fromIntegral getVarNat
+        replicateReversed [] nCount get
+    put ls = do
+        let (nCount, lsr) = countAndReverse ls
+        putVarNat (fromIntegral nCount)
+        mapM_ put lsr
+    {-# INLINE get #-}
+    {-# INLINE put #-}
+
+-- replicate an operation and build a reversed list of results.
+replicateReversed :: (Monad m) => [a] -> Int -> m a -> m [a]
+replicateReversed xs 0 _ = return xs
+replicateReversed xs n op = op >>= \ x -> replicateReversed (x:xs) (n-1) op
+
+-- single pass to count and reverse list
+countAndReverse :: [a] -> (Int, [a])
+countAndReverse = cr [] 0 where
+    cr l !n (x:xs) = cr (x:l) (n+1) xs
+    cr l !n [] = (n, l)
+
 
 instance (VCacheable a, VCacheable b) => VCacheable (a,b) where
     get = liftM2 (,) get get
