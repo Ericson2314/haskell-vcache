@@ -1,4 +1,4 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE ForeignFunctionInterface, BangPatterns #-}
 
 -- allocators for PVars and VRefs
 module Database.VCache.Alloc
@@ -211,11 +211,11 @@ allocVRefIO vc _data _deps =
     listDups' txn (vcache_db_caddrs vc) vName >>= \ caddrs ->
     seek (matchCandidate vc txn vData) caddrs >>= \ mbFound ->
     case mbFound of
-        Just addr -> return addr
+        Just !addr -> return addr
         Nothing -> 
             let acRef = vcache_allocator vc in
             let allocFn = allocVRef _name _data _deps in
-            atomicModifyIORef acRef allocFn >>= \ addr ->
+            atomicModifyIORef acRef allocFn >>= \ !addr ->
             signalAlloc vc >> 
             return addr
 {-# NOINLINE allocVRefIO #-}
