@@ -118,6 +118,9 @@ type EphMap = Map Address (Map TypeRep Eph)
     -- Address can (via structure sharing at the serialization layer) have
     -- many types.
 
+-- TODO: I may need a way to "reserve" VRef addresses for destruction, 
+-- i.e. such that I can guard against 
+
 -- Every VRef contains its own cache. (Thus, there is no extra lookup
 -- overhead to test the cache, and this simplifies interaction with GC). 
 -- The cache includes an integer as a bitfield to describe mode.
@@ -290,6 +293,8 @@ data VSpace = VSpace
 
     , vcache_alloc_init :: {-# UNPACK #-} !Address -- (for stats) initial allocator on open
 
+    , vcache_gc_start   :: !(IORef (Maybe Address)) -- supports incremental GC
+    , vcache_gc_count   :: !(IORef Int) -- (stat) number of addresses GC'd
 
     -- Still needed:
     --  data for GC guidance

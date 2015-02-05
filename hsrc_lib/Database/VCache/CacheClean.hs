@@ -1,15 +1,13 @@
 
 -- Functions to clear cached values and perform basic garbage collection.
 -- I.e. this is the janitorial module.
-module Database.VCache.Clean
+module Database.VCache.CacheClean
     ( cleanCache
-    , runGarbageCollector
     ) where
 
 import Control.Monad
 import qualified Data.Map.Strict as Map
 import Control.Concurrent
-import Control.Concurrent.STM
 
 import Database.LMDB.Raw
 import Database.VCache.Types
@@ -53,8 +51,4 @@ usleep n = do
 -- I've had some bad experiences with threadDelay causing space leaks. 
 -- But maybe it has been fixed? I'll need to check it out later.
 
-
-runGarbageCollector :: VSpace -> MDB_txn -> Address -> IO ()
-runGarbageCollector vc txn allocInit =
-    putStrLn "VCache TODO: garbage collection"
 

@@ -1,12 +1,17 @@
 -- Implementation of the Writer threads.
 --
--- Some goals here:
+-- Some general design goals here:
+--
 --   Favor sequential processing (not random access)
---   Only a single read/write pass per database per step
---   Append new written content when possible
+--   Single read/write pass per database per frame
+--   Append newly written content when possible
+--
+-- Currently these goals are mostly met, except that I perform two
+-- passes through vcache_db_refct0 - once to select addresses for
+-- GC, and later to update reference counts.
 --   
 module Database.VCache.Write
-    ( initWriterThreads
+    ( writerStep
     ) where
 
 import Control.Monad
@@ -24,59 +29,28 @@ import Foreign.Ptr
 import Foreign.Storable
 import Foreign.Marshal.Alloc
 
-import qualified System.IO as Sys
-import qualified System.Exit as Sys
-
 import Database.LMDB.Raw
 import Database.VCache.Types 
 import Database.VCache.VPutFini -- serialize updated PVars
 import Database.VCache.VGetInit -- read dependencies to manage refcts
 import Database.VCache.RWLock -- need a writer lock
 import Database.VCache.Refct  -- to update reference counts
-import Database.VCache.Clean  -- GC and Cache management
 
 -- a write batch records, for each address, both some content 
--- and a list of addresses to incref
+-- and a list of addresses to incref. 
+--
+-- Note: if a WriteCell has a null ByteString, that means we'll
+-- GC the content. Empty Bytestring is not a possible output 
+-- from VPut because there is always a size value for addresses.
 type WriteBatch = Map Address WriteCell
-type WriteCell = (ByteString, [Address])
+type WriteCell = (ByteString, [PutChild])
 
 -- when processing write batches, we'll need to track
 -- differences in reference counts for each address.
 type RefctDiff = Map Address Refct
 
-
 addrSize :: Int
 addrSize = sizeOf (undefined :: Address)
-
--- | Create the writer thread(s). These threads run in the background
--- and are responsible for pushing data from PVars to the LMDB layer. 
-initWriterThreads :: VSpace -> IO ()
-initWriterThreads vc = begin where
-    begin = do
-        task (writerStep vc)
-        task (cleanCache vc)
-    task step = void (forkIO (forever step `catch` onE))
-    onE :: SomeException -> IO ()
-    onE e | isBlockedOnMVar e = return () -- full GC of VCache
-    onE e = do
-        putErrLn "VCache writer thread has failed."
-        putErrLn (indent "  " (show e))
-        putErrLn "Halting program."
-        Sys.exitFailure
-
-isBlockedOnMVar :: (Exception e) => e -> Bool
-isBlockedOnMVar = isJust . test . toException where
-    test :: SomeException -> Maybe BlockedIndefinitelyOnMVar
-    test = fromException
-
-putErrLn :: String -> IO ()
-putErrLn = Sys.hPutStrLn Sys.stderr
-
-indent :: String -> String -> String
-indent ws = (ws ++) . indent' where
-    indent' ('\n':s) = '\n' : ws ++ indent' s
-    indent' (c:s) = c : indent' s
-    indent' [] = []
 
 -- Single step for VCache writer.
 writerStep :: VSpace -> IO ()
@@ -86,11 +60,18 @@ writerStep vc = withRWLock (vcache_rwlock vc) $ do
     wb <- seralizeWrites (write_data ws)
     af <- atomicModifyIORef (vcache_allocator vc) allocFrameStep
     let ab = Map.map fnWriteAlloc (alloc_list af) -- Map Address ByteString
-    let fb = Map.union wb ab -- favor written data over allocations
+    let ub = Map.union wb ab -- favor written data over allocations
     let allocInit = alloc_init af 
     txn <- mdb_txn_begin (vcache_db_env vc) Nothing False
 
-    -- update the virtual memory & record old dependencies
+    -- Select a batch of addresses for GC.
+    let gcLimit = max 1000 (2 * Map.size ub) -- for incremental GC
+    gcb <- runGarbageCollector vc txn gcLimit
+    let fb = Map.union gcb ub   -- gcb and ub should be independent
+    let bSep = Map.size fb == (Map.size ub + Map.size gcb) 
+    unless bSep (fail "VCache bug: GC and update on same address")
+
+    -- update the virtual memory & return total change in dependencies!
     rcDiff <- updateVirtualMemory vc txn allocInit fb
 
     -- update reference counts.
@@ -101,16 +82,13 @@ writerStep vc = withRWLock (vcache_rwlock vc) $ do
     -- record secondary indexes: PVar roots, VRef hashes
     writeSecondaryIndexes vc txn (alloc_seek af)
 
-    -- perform garbage collection
-    runGarbageCollector vc txn allocInit 
-
     -- finish up
     mdb_txn_commit txn
-    mapM_ syncSignal (write_sync ws)
+    modifyIORef' (vcache_gc_count vc) (+ (Map.size gcb)) -- update GC count
+    vcache_signal_writes vc ws  -- report writes & prevent early GC of writes
+    mapM_ syncSignal (write_sync ws) -- signal durable transaction threads
+    
 
-    -- Report durable writes, e.g. for stats. 
-    -- Also, prevents GC of PVars until after commit.
-    vcache_signal_writes vc ws
 
 isNewRoot :: Allocation -> Bool
 isNewRoot an = isPVarAddr (alloc_addr an) && not (BS.null (alloc_name an))
@@ -127,14 +105,10 @@ seralizeWrites = Map.traverseWithKey (const writeTxW)
 writeTxW :: TxW -> IO WriteCell
 writeTxW (TxW pv v) =
     runVPutIO (pvar_space pv) (pvar_write pv v) >>= \ ((), _data, _deps) ->
-    return (_wdd _data _deps)
+    return (_data,_deps)
 
 fnWriteAlloc :: Allocation -> WriteCell
-fnWriteAlloc an = _wdd (alloc_data an) (alloc_deps an)
-
-_wdd :: ByteString -> [PutChild] -> WriteCell
-_wdd _data _deps = (_data, _addr) where
-    _addr = fmap putChildAddr _deps
+fnWriteAlloc an = (alloc_data an, alloc_deps an)
 
 -- Reviewing safety one more time:
 --
@@ -307,30 +281,34 @@ updateVirtualMemory vc txn allocStart fb =
     cmem <- mdb_cursor_open' txn (vcache_db_memory vc) 
 
     -- logic inlined here for easy access to cursors and buffers
-    let appendEntry = compileWriteFlags [MDB_APPEND]
-    let newContent addr bytes = 
+    let af = compileWriteFlags [MDB_APPEND]
+    let newContent addr bytes = assert (not (BS.null bytes)) $  
             withByteStringVal bytes $ \ vAllocData -> do
             poke pAddr addr 
-            bOK <- mdb_cursor_put' appendEntry cmem vAddr vAllocData
+            bOK <- mdb_cursor_put' af cmem vAddr vAllocData
             unless bOK (addrBug addr "data could not be appended")
-    let updateAtCursor = compileWriteFlags [MDB_CURRENT]
-    let processCell rcs (addr, (bytes, _newDeps)) =
-            if (addr >= allocStart) then newContent addr bytes >> return rcs else
+    let df = compileWriteFlags []
+    let uf = compileWriteFlags [MDB_CURRENT]
+    let processCell rcs (addr, (bytes, newDeps)) =
+            let bAlloc = addr >= allocStart in
+            if bAlloc then newContent addr bytes >> return rcs else
             withByteStringVal bytes $ \ vUpdData -> do
             poke pAddr addr
             bFound <- mdb_cursor_get' MDB_SET cmem pvAddr pvOldData
-            unless bFound (addrBug addr "is undefined")
+            unless bFound (addrBug addr "undefined during update")
             vOldData <- peek pvOldData
-            deps <- readDataDeps vc addr vOldData
-            bOK <- mdb_cursor_put' updateAtCursor cmem vAddr vUpdData
-            unless bOK (addrBug addr "data could not be updated")
-            return $! addRefcts deps rcs
+            oldDeps <- readDataDeps vc addr vOldData
+            let bDel = (0 == mv_size vUpdData)
+            if bDel then assert (L.null newDeps) $ mdb_cursor_del' df cmem
+                    else mdb_cursor_put' uf cmem vAddr vUpdData >>= \ bOK ->
+                         unless bOK (addrBug addr "data could not be updated")
+            return $! addRefcts oldDeps rcs
 
     rcOld <- foldM processCell Map.empty (Map.toAscList fb)
     mdb_cursor_close' cmem
 
     assertValidOldDeps allocStart rcOld -- sanity check
-    let rcNew = Map.foldr' (addRefcts . snd) Map.empty fb
+    let rcNew = Map.foldr' (addRefcts . fmap putChildAddr . snd) Map.empty fb
     let rcDiff = Map.unionWith (-) rcNew rcOld
 
     return $! rcDiff
@@ -355,13 +333,44 @@ assertValidOldDeps allocStart rcDepsOld =
 readDataDeps :: VSpace -> Address -> MDB_val -> IO [Address]
 readDataDeps vc addr vData = _vget vgetInit state0 >>= toDeps where
     toDeps (VGetR () sf) = return (vget_children sf)
-    toDeps (VGetE eMsg) = addrBug addr $ "malformed data\n" ++ indent "  " eMsg
+    toDeps (VGetE eMsg) = addrBug addr $ "contains malformed data: " ++ eMsg
     state0 = VGetS
         { vget_children = []
         , vget_target = mv_data vData
         , vget_limit = mv_data vData `plusPtr` fromIntegral (mv_size vData)
         , vget_space = vc
         }
+
+
+-- REGARDING GC
+--
+-- For VRefs, due to structure sharing, it is possible to acquire
+-- a reference to a value in the database at the same time the GC
+-- decides to destroy the value. This seems problematic for my 
+-- earlier ideas about how to run the GC. 
+--
+-- I probably need some way to "reserve" an address for deletion,
+-- such that the garbage collector can both prevent revival of
+-- dead VRef addresses, and account for any that were revived in
+-- the time the GC was running.
+--
+-- My idea is this: replace the VRef EphMap with a fuller data
+-- 
+
+
+
+
+-- This garbage collector step simply searches the database for
+-- addresses with zero references, filters for addresses in one
+-- of the ephemeron maps, then 
+runGarbageCollector :: VSpace -> MDB_txn -> Int -> IO WriteBatch
+runGarbageCollector vc txn gcLimit = error "TODO"
+
+gcCell :: WriteCell
+gcCell = (BS.empty, [])    
+
+
+
 
 -- How many threads?
 --

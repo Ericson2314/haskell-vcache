@@ -14,17 +14,24 @@ import Foreign.Ptr
 
 import Data.Bits
 import Data.IORef
+import Data.Maybe
 import qualified Data.Map.Strict as Map
 import qualified Data.ByteString as BS
 import qualified Data.List as L
 import Control.Concurrent.MVar
 import Control.Concurrent.STM.TVar
+import Control.Concurrent
+
+import qualified System.IO as Sys
+import qualified System.Exit as Sys
 
 import Database.LMDB.Raw
 import Database.VCache.Types 
 import Database.VCache.RWLock
 import Database.VCache.Aligned
-import Database.VCache.Write
+import Database.VCache.Write -- Writer step
+import Database.VCache.CacheClean -- Cache manager
+
 
 
 -- | Open a VCache with a given database file. 
@@ -127,6 +134,8 @@ openVC' nBytes fl fp = do
         cLimit <- newIORef vcDefaultCacheLimit
         cSize <- newIORef 0
         ctWrites <- newIORef $ WriteCt 0 0 0
+        gcStart <- newIORef Nothing
+        gcCount <- newIORef 0
         rwLock <- newRWLock
 
         -- Realistically, we're unlikely GC our VCache before the
@@ -158,12 +167,12 @@ openVC' nBytes fl fp = do
                     , vcache_signal_writes = updWriteCt ctWrites
                     , vcache_ct_writes = ctWrites
                     , vcache_alloc_init = allocStart
+                    , vcache_gc_start = gcStart
+                    , vcache_gc_count = gcCount
                     }
                 }
 
-        -- Star the background writer threads. In addition to performing
-        -- writes, these threads must handle ongoing GC tasks.
-        initWriterThreads (vcache_space vc)
+        initVCacheThreads (vcache_space vc)
         return $! vc
 
 -- our allocator should be set for the next *even* address.
@@ -196,3 +205,38 @@ updWriteCt var w = modifyIORef' var $ \ wct ->
     let pvCt = wct_pvars wct + Map.size (write_data w) in
     let synCt = wct_sync wct + L.length (write_sync w) in
     WriteCt { wct_frames = frmCt, wct_pvars = pvCt, wct_sync = synCt }
+
+
+-- | Create background threads needed by VCache.
+initVCacheThreads :: VSpace -> IO ()
+initVCacheThreads vc = begin where
+    begin = do
+        task (writerStep vc)
+        task (cleanCache vc)
+    task step = void (forkIO (forever step `catch` onE))
+    onE :: SomeException -> IO ()
+    onE e | isBlockedOnMVar e = return () -- full GC of VCache
+    onE e = do
+        putErrLn "VCache writer thread has failed."
+        putErrLn (indent "  " (show e))
+        putErrLn "Halting program."
+        Sys.exitFailure
+
+isBlockedOnMVar :: (Exception e) => e -> Bool
+isBlockedOnMVar = isJust . test . toException where
+    test :: SomeException -> Maybe BlockedIndefinitelyOnMVar
+    test = fromException
+
+putErrLn :: String -> IO ()
+putErrLn = Sys.hPutStrLn Sys.stderr
+
+indent :: String -> String -> String
+indent ws = (ws ++) . indent' where
+    indent' ('\n':s) = '\n' : ws ++ indent' s
+    indent' (c:s) = c : indent' s
+    indent' [] = []
+
+
+
+
+
