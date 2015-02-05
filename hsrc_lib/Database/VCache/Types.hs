@@ -14,7 +14,9 @@ module Database.VCache.Types
     , VGet(..), VGetS(..), VGetR(..)
     , VCacheable(..)
     , Allocator(..), AllocFrame(..), Allocation(..)
+    , Collector(..)
     , Writes(..), WriteLog, WriteCt(..)
+    , WriteBatch, WriteCell
 
     -- a few utilities
     , allocFrameSearch
@@ -275,13 +277,10 @@ data VSpace = VSpace
     , vcache_db_refct0  :: {-# UNPACK #-} !MDB_dbi' -- address → ()
 
     , vcache_allocator  :: !(IORef Allocator) -- allocate new VRefs and PVars
+    , vcache_collector  :: !(IORef Collector) -- Haskell-layer memory management
     , vcache_signal     :: !(MVar ()) -- signal writer that work is available
     , vcache_writes     :: !(TVar Writes) -- STM layer PVar writes
     , vcache_rwlock     :: !RWLock -- replace gap left by MDB_NOLOCK
-
-
-    , vcache_mem_vrefs  :: !(IORef EphMap) -- track VRefs in memory
-    , vcache_mem_pvars  :: !(IORef PVEphMap) -- track PVars in memory
 
     , vcache_c_limit    :: !(IORef Int) -- weight limit
     , vcache_c_size     :: !(IORef Int) -- estimated current size (for stats)
@@ -358,6 +357,7 @@ data Allocator = Allocator
     , alloc_frm_next :: !AllocFrame -- frame N+1 (next step)
     , alloc_frm_curr :: !AllocFrame -- frame N   (curr step)
     , alloc_frm_prev :: !AllocFrame -- frame N-1 (prev step)
+    , alloc_old_init :: {-# UNPACK #-} !Address -- alloc_init at frame N-2 
     }
 
 data AllocFrame = AllocFrame 
@@ -378,6 +378,28 @@ allocFrameSearch f a = f n <|> f c <|> f p where
     n = alloc_frm_next a
     c = alloc_frm_curr a
     p = alloc_frm_prev a
+
+-- | the collector
+--
+-- The purpose of the collector is to support Haskell-layer memory
+-- management. This involves both some ephemeron tables (to help
+-- track objects in memory) and two GC frames. 
+--
+-- The GC frames serve role similar to allocator frames. VRefs with
+-- zero references may go one of two ways: either they can revive 
+-- due to structure sharing, or they can be GC'd by the background
+-- writer thread. We must reject revival of a VRef if selected for
+-- GC, and vice versa. To arbitrate this atomically, GC frames and
+-- the ephemeron tables use the same IORef. (STM isn't viable due
+-- to unsafePerformIO constructors for VRefs.)
+-- 
+data Collector = Collector
+    { c_mem_vrefs :: !EphMap 
+    , c_mem_pvars :: !PVEphMap
+    , c_gcf_curr  :: !GCFrame
+    , c_gcf_prev  :: !GCFrame
+    }
+type GCFrame = WriteBatch 
 
 -- thoughts: I may need an additional allocations list for anonymous
 -- PVars, if only to support a `newPVarIO` or similar.
@@ -475,6 +497,14 @@ data WriteCt = WriteCt
     , wct_sync   :: {-# UNPACK #-} !Int -- how many sync requests
     }
 
+-- | A batch of updates to perform on memory, including dependencies
+-- to incref. 
+--
+-- Note: if a WriteCell has a null ByteString, this means we'll delete
+-- the content. Empty bytestring is impossible as output from VPut
+-- because we have at least a size for the child list.
+type WriteBatch = Map Address WriteCell
+type WriteCell = (ByteString, [PutChild])
 
 
 

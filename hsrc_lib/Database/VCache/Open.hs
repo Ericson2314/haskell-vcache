@@ -125,10 +125,8 @@ openVC' nBytes fl fp = do
 
         -- ephemeral resources
         let allocStart = nextAllocAddress allocEnd
-        let initAllocator = freshAllocator allocStart
-        allocator <- newIORef initAllocator
-        memVRefs <- newIORef Map.empty
-        memPVars <- newIORef Map.empty
+        allocator <- newIORef (freshAllocator allocStart)
+        collector <- newIORef freshCollector
         tvWrites <- newTVarIO (Writes Map.empty [])
         mvSignal <- newMVar () 
         cLimit <- newIORef vcDefaultCacheLimit
@@ -156,9 +154,8 @@ openVC' nBytes fl fp = do
                     , vcache_db_caddrs = dbiHashes
                     , vcache_db_refcts = dbiRefct
                     , vcache_db_refct0 = dbiRefct0
-                    , vcache_mem_vrefs = memVRefs
-                    , vcache_mem_pvars = memPVars
                     , vcache_allocator = allocator
+                    , vcache_collector = collector
                     , vcache_signal = mvSignal
                     , vcache_writes = tvWrites
                     , vcache_rwlock = rwLock
@@ -196,7 +193,10 @@ findLastAddrAllocated txn dbiMemory = alloca $ \ pKey ->
 freshAllocator :: Address -> Allocator
 freshAllocator addr =
     let f0 = AllocFrame Map.empty Map.empty addr in
-    Allocator addr f0 f0 f0
+    Allocator addr f0 f0 f0 addr
+
+freshCollector :: Collector
+freshCollector = Collector Map.empty Map.empty Map.empty Map.empty
 
 -- Update write counts.
 updWriteCt :: IORef WriteCt -> Writes -> IO ()

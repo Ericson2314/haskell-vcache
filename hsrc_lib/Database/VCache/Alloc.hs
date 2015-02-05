@@ -175,9 +175,8 @@ allocPVarVTx ac =
 newVRefIO :: (VCacheable a) => VSpace -> a -> CacheMode -> IO (VRef a)
 newVRefIO vc v cm =
     runVPutIO vc (put v) >>= \ ((), _data, _deps) ->
-    allocVRefIO vc _data _deps >>= \ addr ->
+    allocVRefIO vc _data _deps >>= \ vref ->
     let w = cacheWeight (BS.length _data) (L.length _deps) in
-    addr2vref vc addr >>= \ vref ->
     initVRefCache vref v w cm >>= \ () ->
     return vref
 {-# NOINLINE newVRefIO #-}
@@ -197,12 +196,11 @@ initVRefCache vref v w cm = atomicModifyIORef (vref_cache vref) $ \ c -> case c 
 newVRefIO' :: (VCacheable a) => VSpace -> a -> IO (VRef a)
 newVRefIO' vc v = 
     runVPutIO vc (put v) >>= \ ((), _data, _deps) ->
-    allocVRefIO vc _data _deps >>= \ addr ->
-    addr2vref vc addr 
+    allocVRefIO vc _data _deps
 {-# INLINABLE newVRefIO' #-}
 
 -- | Match existing structure in database. If not found, allocate one.
-allocVRefIO :: VSpace -> ByteString -> [PutChild] -> IO Address
+allocVRefIO :: (VCacheable a) => VSpace -> ByteString -> [PutChild] -> IO (VRef a)
 allocVRefIO vc _data _deps = 
     let _name = BS.take 8 $ hash _data in
     withByteStringVal _name $ \ vName ->
@@ -211,13 +209,14 @@ allocVRefIO vc _data _deps =
     listDups' txn (vcache_db_caddrs vc) vName >>= \ caddrs ->
     seek (matchCandidate vc txn vData) caddrs >>= \ mbFound ->
     case mbFound of
-        Just !addr -> return addr
+        Just !vref -> return vref
         Nothing -> 
             let acRef = vcache_allocator vc in
             let allocFn = allocVRef _name _data _deps in
             atomicModifyIORef acRef allocFn >>= \ !addr ->
-            signalAlloc vc >> 
-            return addr
+            addr2vref vc addr >>= \ mbv -> case mbv of
+                Nothing -> fail $ "VRef bug: must not GC recent allocations!"
+                Just !vref -> signalAlloc vc >> return vref 
 {-# NOINLINE allocVRefIO #-}
    
 seek :: (Monad m) => (a -> m (Maybe b)) -> [a] -> m (Maybe b)
@@ -241,21 +240,25 @@ listDups' txn dbi vKey =
     b0 <- mdb_cursor_get' MDB_SET_KEY crs pKey pVal
     loop [] b0
 
--- seek an exact match in the database
-matchCandidate :: VSpace -> MDB_txn -> MDB_val -> MDB_val -> IO (Maybe Address)
+-- seek an exact match in the database. This will return Nothing in
+-- one of these conditions:
+--   (a) the candidate is not an exact match for the data
+--   (b) the candidate has recently been GC'd from memory
+-- Otherwise will return the necessary VRef.
+matchCandidate :: (VCacheable a) => VSpace -> MDB_txn -> MDB_val -> MDB_val -> IO (Maybe (VRef a))
 matchCandidate vc txn vData vCandidateAddr = do
     mbR <- mdb_get' txn (vcache_db_memory vc) vCandidateAddr
     case mbR of
-        Nothing -> -- this should not happen
+        Nothing -> -- inconsistent hashmap and memory, should never happen
             peekAddr vCandidateAddr >>= \ addr ->
-            fail $ "VCache bug: undefined address " 
-                    ++ show addr ++ " in hashmap" 
+            fail $ "VCache bug: undefined address " ++ show addr ++ " in hashmap" 
         Just vData' ->
             let bSameSize = mv_size vData == mv_size vData' in
             if not bSameSize then return Nothing else
             c_memcmp (mv_data vData) (mv_data vData') (mv_size vData) >>= \ o ->
             if (0 /= o) then return Nothing else
-            liftM Just (peekAddr vCandidateAddr)
+            peekAddr vCandidateAddr >>= \ addr ->
+            addr2vref vc addr
 
 withCursor' :: MDB_txn -> MDB_dbi' -> (MDB_cursor' -> IO a) -> IO a
 withCursor' txn dbi = bracket g d where

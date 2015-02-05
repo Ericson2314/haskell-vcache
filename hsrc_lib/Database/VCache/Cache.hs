@@ -43,7 +43,8 @@ setVCacheSize = writeIORef . vcache_c_limit
 -- on the number of VRefs in Haskell memory.
 clearVCache :: VSpace -> IO ()
 clearVCache vc = do
-    ephMap <- readIORef (vcache_mem_vrefs vc)
+    collector <- readIORef (vcache_collector vc)
+    let ephMap = c_mem_vrefs collector
     mapM_ (mapM_ clearEphCache . Map.elems) (Map.elems ephMap)
 {-# INLINABLE clearVCache #-}
 

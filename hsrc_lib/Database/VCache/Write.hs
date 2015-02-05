@@ -36,15 +36,6 @@ import Database.VCache.VGetInit -- read dependencies to manage refcts
 import Database.VCache.RWLock -- need a writer lock
 import Database.VCache.Refct  -- to update reference counts
 
--- a write batch records, for each address, both some content 
--- and a list of addresses to incref. 
---
--- Note: if a WriteCell has a null ByteString, that means we'll
--- GC the content. Empty Bytestring is not a possible output 
--- from VPut because there is always a size value for addresses.
-type WriteBatch = Map Address WriteCell
-type WriteCell = (ByteString, [PutChild])
-
 -- when processing write batches, we'll need to track
 -- differences in reference counts for each address.
 type RefctDiff = Map Address Refct
@@ -80,6 +71,8 @@ writerStep vc = withRWLock (vcache_rwlock vc) $ do
     updateReferenceCounts vc txn allocInit rcBatch                              -- write batch of reference counts
 
     -- record secondary indexes: PVar roots, VRef hashes
+    -- TODO: include *deleted* VRefs, i.e. a map of Hashes to Addresses.
+    --   I'll probably need to remap allocations, in this case.
     writeSecondaryIndexes vc txn (alloc_seek af)
 
     -- finish up
@@ -127,22 +120,23 @@ fnWriteAlloc an = (alloc_data an, alloc_deps an)
 --
 allocFrameStep :: Allocator -> (Allocator, AllocFrame)
 allocFrameStep ac =
-    let thisFrame = alloc_frm_next ac in
-    let prevFrame = alloc_frm_curr ac in
-    let newFrame = AllocFrame 
-            { alloc_init = alloc_new_addr ac
-            , alloc_list = Map.empty
-            , alloc_seek = Map.empty
+    let addr = alloc_new_addr ac in
+    let ac' = Allocator 
+            { alloc_new_addr = addr
+            , alloc_frm_next = newFrame addr
+            , alloc_frm_curr = alloc_frm_next ac
+            , alloc_frm_prev = alloc_frm_curr ac
+            , alloc_old_init = alloc_init (alloc_frm_prev ac)
             }
     in
-    let newAC = Allocator 
-            { alloc_new_addr = (alloc_new_addr ac)
-            , alloc_frm_next = newFrame
-            , alloc_frm_curr = thisFrame
-            , alloc_frm_prev = prevFrame
-            }
-    in
-    (newAC, thisFrame)
+    (ac', alloc_frm_curr ac')
+
+newFrame :: Address -> AllocFrame
+newFrame addr = AllocFrame
+    { alloc_init = addr
+    , alloc_seek = Map.empty
+    , alloc_list = Map.empty
+    }
 
 syncSignal :: MVar () -> IO ()
 syncSignal mv = void (tryPutMVar mv ())
@@ -270,6 +264,10 @@ addrBug addr msg = fail $ "VCache bug: address " ++ show addr ++ " " ++ msg
 --
 -- By combining the reference counting with this operation, we avoid
 -- two passes through memory (goal is to avoid unnecessary paging).
+--
+-- TODO: In addition to outputting a reference count diff, I also 
+-- need to record (hash,address) pairs for any deleted VRefs. 
+-- 
 updateVirtualMemory :: VSpace -> MDB_txn -> Address -> WriteBatch -> IO RefctDiff
 updateVirtualMemory vc txn allocStart fb = 
     if Map.null fb then return Map.empty else  
@@ -298,11 +296,12 @@ updateVirtualMemory vc txn allocStart fb =
             unless bFound (addrBug addr "undefined during update")
             vOldData <- peek pvOldData
             oldDeps <- readDataDeps vc addr vOldData
+            let rcs' = addRefcts oldDeps rcs
             let bDel = (0 == mv_size vUpdData)
             if bDel then assert (L.null newDeps) $ mdb_cursor_del' df cmem
                     else mdb_cursor_put' uf cmem vAddr vUpdData >>= \ bOK ->
                          unless bOK (addrBug addr "data could not be updated")
-            return $! addRefcts oldDeps rcs
+            return $! rcs'
 
     rcOld <- foldM processCell Map.empty (Map.toAscList fb)
     mdb_cursor_close' cmem
@@ -342,21 +341,35 @@ readDataDeps vc addr vData = _vget vgetInit state0 >>= toDeps where
         }
 
 
--- REGARDING GC
+-- GC Constraints:
 --
--- For VRefs, due to structure sharing, it is possible to acquire
--- a reference to a value in the database at the same time the GC
--- decides to destroy the value. This seems problematic for my 
--- earlier ideas about how to run the GC. 
+-- VRefs can be revived due to structure sharing. I must arbitrate
+-- whether a VRef is GC'd or revived, i.e. via atomic update and
+-- tracking GC frames.
 --
--- I probably need some way to "reserve" an address for deletion,
--- such that the garbage collector can both prevent revival of
--- dead VRef addresses, and account for any that were revived in
--- the time the GC was running.
+-- Question: Will I need to combine the Allocator and Collector
+-- models into a single IORef? If not, how much lag time between
+-- allocation and GC will I require?
 --
--- My idea is this: replace the VRef EphMap with a fuller data
+-- In worst case scenario, we have reader at frame N-2 relative
+-- to writer, and the reader reads the allocator whose earliest
+-- content corresponds to N-4. So, if I separate Allocator and
+-- Collector, I'm needing to protect at about four frames, modulo
+-- fencepost errors.
+--
+-- If I combine the collector and allocator, then it wouldn't be a
+-- problem to GC addresses that are still in the allocations table.
+-- I only need to protect new allocations, which should be trivial:
+-- New allocations won't be in the zeroes table yet.
+--
+-- So, I'm leaning towards combining these. That gives me about
+-- three allocation frames and two GC frames and two ephemeron
+-- tables to work with, plus a few addresses at the edges.
+--
+-- At this point, I have greater contention on this single 
+-- structure. It shouldn't be a big problem, since the bulk
+-- of computations would still be parallelizable.
 -- 
-
 
 
 
