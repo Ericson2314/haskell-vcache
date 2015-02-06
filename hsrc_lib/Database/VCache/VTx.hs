@@ -58,15 +58,16 @@ updateSync :: Bool -> MVar () -> [MVar ()] -> [MVar ()]
 updateSync bSync v = if bSync then (v:) else id
 {-# INLINE updateSync #-}
 
--- | A VTx transaction is Atomic, Consistent, and Isolated. Durability
--- is optional, and requires an additional wait for a background writer
--- thread to signal that contents written and read are consistent with 
--- the persistence layer. 
---
--- The decision to mark a transaction durable is at the domain layer.
--- Developers may decide based on the specific variables and values
--- involved, e.g. marking durability when committing to a purchase,
--- but not for merely updating the shopping cart.
+-- | Durability for a VTx transaction is optional: it requires an
+-- additional wait for the background thread to signal that it has
+-- committed content to the persistence layer. Due to how writes 
+-- are batched, a durable transaction may share its wait with many
+-- other transactions that occur at more or less the same time.
+-- 
+-- Developers should mark a transaction durable only if necessary
+-- based on domain layer policies. E.g. for a shopping service, 
+-- normal updates and views of the virtual shopping cart might not
+-- be durable while committing to a purchase is durable. 
 --
 markDurable :: VTx ()
 markDurable = VTx $ modify $ \ vtx -> 
@@ -74,9 +75,9 @@ markDurable = VTx $ modify $ \ vtx ->
 {-# INLINE markDurable #-}
 
 -- | This variation of markDurable makes it easier to short-circuit
--- complex computations to decide durability. `markDurableIf False`
--- does not affect durability. If durability is already marked, the
--- boolean is not evaluated.
+-- complex computations to decide durability when the transaction is
+-- already durable. If durability is already marked, the boolean is
+-- not evaluated.
 markDurableIf :: Bool -> VTx ()
 markDurableIf b = VTx $ modify $ \ vtx -> 
     let bDurable = vtx_durable vtx || b in

@@ -4,10 +4,12 @@ module Database.VCache.Stats
     , vcacheStats
     ) where
 
+import Data.IORef
+import Control.Concurrent.MVar
+import qualified Data.Map.Strict as Map
+
 import Database.LMDB.Raw
 import Database.VCache.Types
-import Data.IORef
-import qualified Data.Map.Strict as Map
 
 
 -- | Miscellaneous statistics for a VCache instance. These are not
@@ -38,26 +40,25 @@ vcacheStats (VCache vc _) = withRdOnlyTxn vc $ \ txnStat -> do
     let db = vcache_db_env vc
     envInfo <- mdb_env_info db
     envStat <- mdb_env_stat db
-    memStat <- mdb_stat' txnStat (vcache_db_memory vc)
+    dbMemStat <- mdb_stat' txnStat (vcache_db_memory vc)
     rootStat <- mdb_stat' txnStat (vcache_db_vroots vc)
     hashStat <- mdb_stat' txnStat (vcache_db_caddrs vc)
-    allocator <- readIORef (vcache_allocator vc)
-    collector <- readIORef (vcache_collector vc)
-    cTgtLim <- readIORef (vcache_c_limit vc)
-    cSize <- readIORef (vcache_c_size vc)
+    memory <- readMVar (vcache_memory vc)
+    cTgtLim <- readIORef (vcache_climit vc)
+    cSize <- readIORef (vcache_csize vc)
     gcCount <- readIORef (vcache_gc_count vc)
     wct <- readIORef (vcache_ct_writes vc)
+    
     let fileSize = (1 + (fromIntegral $ me_last_pgno envInfo)) 
                  * (fromIntegral $ ms_psize envStat)
     let vrefCount = (fromIntegral $ ms_entries hashStat) 
-    let pvarCount = (fromIntegral $ ms_entries memStat) - vrefCount
+    let pvarCount = (fromIntegral $ ms_entries dbMemStat) - vrefCount
     let rootCount = (fromIntegral $ ms_entries rootStat)
-    let memVRefsMap = c_mem_vrefs collector
-    let memPVarsMap = c_mem_pvars collector
-    let memVRefsCount = Map.foldl' (\ a b -> a + Map.size b) 0 memVRefsMap
-    let memPVarsCount = Map.size memPVarsMap
-    let allocPos = alloc_new_addr allocator
-    let allocCount = fromIntegral $ (allocPos - vcache_alloc_init vc) `div` 2
+    let memVRefsCount = Map.foldl' (\ a b -> a + Map.size b) 0 (mem_vrefs memory)
+    let memPVarsCount = Map.size (mem_pvars memory)
+    let allocPos = alloc_new_addr (mem_alloc memory)
+    let allocDiff = allocPos - vcache_alloc_init vc
+    let allocCount = fromIntegral $ allocDiff `div` 2 
     return $ VCacheStats
         { vcstat_file_size = fileSize
         , vcstat_vref_count = vrefCount

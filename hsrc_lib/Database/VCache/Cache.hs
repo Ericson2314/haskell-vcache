@@ -6,7 +6,9 @@ module Database.VCache.Cache
     , clearVCache
     ) where
 
+import Control.Applicative ((<$>))
 import Data.IORef
+import Control.Concurrent.MVar
 import qualified Data.Map.Strict as Map
 import qualified System.Mem.Weak as Weak
 import Database.VCache.Types
@@ -34,22 +36,23 @@ import Database.VCache.Types
 -- on just the page cache.
 --
 setVCacheSize :: VSpace -> Int -> IO ()
-setVCacheSize = writeIORef . vcache_c_limit
+setVCacheSize = writeIORef . vcache_climit
 {-# INLINE setVCacheSize #-}
 
--- | clearVCache will clear all cached values for all VRefs. This
--- operation isn't recommended for common usage. It may be useful
--- for benchmarks or highly staged applications. The cost depends
--- on the number of VRefs in Haskell memory.
+-- | clearVCache will iterate over the VRefs in Haskell memory at 
+-- the time of the call, and clear the cache for each of them.
+--
+-- This operation isn't recommended for common use, since it can
+-- interfere with different subprograms and threads. But it may
+-- be useful for some applications.
 clearVCache :: VSpace -> IO ()
 clearVCache vc = do
-    collector <- readIORef (vcache_collector vc)
-    let ephMap = c_mem_vrefs collector
-    mapM_ (mapM_ clearEphCache . Map.elems) (Map.elems ephMap)
+    ephMap <- mem_vrefs <$> readMVar (vcache_memory vc)
+    mapM_ (mapM_ clearVREphCache . Map.elems) (Map.elems ephMap)
 {-# INLINABLE clearVCache #-}
 
-clearEphCache :: Eph -> IO ()
-clearEphCache (Eph { eph_cache = wc }) =   
+clearVREphCache :: VREph -> IO ()
+clearVREphCache (VREph { vreph_cache = wc }) =   
     Weak.deRefWeak wc >>= \ mbCache ->
     case mbCache of
         Nothing -> return ()

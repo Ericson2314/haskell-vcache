@@ -7,7 +7,7 @@ module Database.VCache.Read
 import Control.Monad
 import qualified Data.Map.Strict as Map
 import qualified Data.List as L
-import Data.IORef
+import Control.Concurrent.MVar
 import Foreign.Ptr
 import Foreign.Storable
 import Foreign.Marshal.Alloc
@@ -38,7 +38,8 @@ readAddrIO vc addr parser =
         Just vData -> rd vData -- found data in database (ideal)
         Nothing -> -- since not in the database, try the allocator
             let ff = Map.lookup addr . alloc_list in
-            readIORef (vcache_allocator vc) >>= \ ac ->
+            readMVar (vcache_memory vc) >>= \ memory ->
+            let ac = mem_alloc memory in
             case allocFrameSearch ff ac of
                 Just an -> withByteStringVal (alloc_data an) rd -- found data in allocator
                 Nothing -> fail $ "VCache: address " ++ show addr ++ " is undefined!"

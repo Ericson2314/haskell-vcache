@@ -9,6 +9,10 @@
 -- Currently these goals are mostly met, except that I perform two
 -- passes through vcache_db_refct0 - once to select addresses for
 -- GC, and later to update reference counts.
+--
+-- My earlier design didn't account for `newPVar` allowing addresses
+-- to be undefined pending completion of VTx transactions. I'll need
+-- to adjust for this soon.
 --   
 module Database.VCache.Write
     ( writerStep
@@ -22,7 +26,6 @@ import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.List as L
-import Data.Maybe
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Foreign.Ptr
@@ -49,7 +52,7 @@ writerStep vc = withRWLock (vcache_rwlock vc) $ do
     takeMVar (vcache_signal vc) 
     ws <- atomically (takeWrites (vcache_writes vc))
     wb <- seralizeWrites (write_data ws)
-    af <- atomicModifyIORef (vcache_allocator vc) allocFrameStep
+    af <- allocatorFrameStep vc
     let ab = Map.map fnWriteAlloc (alloc_list af) -- Map Address ByteString
     let ub = Map.union wb ab -- favor written data over allocations
     let allocInit = alloc_init af 
@@ -62,7 +65,7 @@ writerStep vc = withRWLock (vcache_rwlock vc) $ do
     let bSep = Map.size fb == (Map.size ub + Map.size gcb) 
     unless bSep (fail "VCache bug: GC and update on same address")
 
-    -- update the virtual memory & return total change in dependencies!
+    -- update the virtual memory, and obtain information about changes
     rcDiff <- updateVirtualMemory vc txn allocInit fb
 
     -- update reference counts.
@@ -80,6 +83,34 @@ writerStep vc = withRWLock (vcache_rwlock vc) $ do
     modifyIORef' (vcache_gc_count vc) (+ (Map.size gcb)) -- update GC count
     vcache_signal_writes vc ws  -- report writes & prevent early GC of writes
     mapM_ syncSignal (write_sync ws) -- signal durable transaction threads
+{-# NOINLINE writerStep #-}
+
+allocatorFrameStep :: VSpace -> IO AllocFrame
+allocatorFrameStep vc = modifyMVarMasked (vcache_memory vc) (return . allocFrameStep)
+{-# INLINE allocatorFrameStep #-}
+
+-- rotate frames and return the new 'current' frame
+allocFrameStep :: Memory -> (Memory, AllocFrame)
+allocFrameStep mem = (mem', alloc_frm_next ac) where
+    ac = mem_alloc mem
+    addr = alloc_new_addr ac
+    ac' = Allocator
+        { alloc_new_addr = addr
+        , alloc_frm_next = newAllocFrame addr
+        , alloc_frm_curr = alloc_frm_next ac
+        , alloc_frm_prev = alloc_frm_curr ac
+        }
+    mem' = mem { mem_alloc = ac' }
+
+newAllocFrame :: Address -> AllocFrame
+newAllocFrame addr = AllocFrame
+    { alloc_init = addr
+    , alloc_seek = Map.empty
+    , alloc_list = Map.empty
+    }
+{-# INLINABLE newAllocFrame #-}
+
+    
     
 
 
@@ -102,41 +133,6 @@ writeTxW (TxW pv v) =
 
 fnWriteAlloc :: Allocation -> WriteCell
 fnWriteAlloc an = (alloc_data an, alloc_deps an)
-
--- Reviewing safety one more time:
---
---   allocFrameStep runs under the writer lock, so older readers are gone.
---   More precisely, current readers are operating on LMDB frames N-1 or 
---   N-2, where frame N is the frame the writer is working on. 
---
---   Readers at N-2 can see any content written by the writer at N-2. But
---   they do need access to content written at frames N-1, N, or delayed
---   to the next writer frame. 
---
---   Thus, the writer at frame N is free to shift content written in frame
---   N into the alloc_frm_curr, while alloc_frm_next becomes the N+1 frame
---   and alloc_frm_prev refers to the N-1 frame. Content from the old 
---   alloc_frm_prev may be garbage collected.
---
-allocFrameStep :: Allocator -> (Allocator, AllocFrame)
-allocFrameStep ac =
-    let addr = alloc_new_addr ac in
-    let ac' = Allocator 
-            { alloc_new_addr = addr
-            , alloc_frm_next = newFrame addr
-            , alloc_frm_curr = alloc_frm_next ac
-            , alloc_frm_prev = alloc_frm_curr ac
-            , alloc_old_init = alloc_init (alloc_frm_prev ac)
-            }
-    in
-    (ac', alloc_frm_curr ac')
-
-newFrame :: Address -> AllocFrame
-newFrame addr = AllocFrame
-    { alloc_init = addr
-    , alloc_seek = Map.empty
-    , alloc_list = Map.empty
-    }
 
 syncSignal :: MVar () -> IO ()
 syncSignal mv = void (tryPutMVar mv ())
@@ -257,18 +253,23 @@ updateReferenceCounts vc txn allocInit rcDiffMap =
 addrBug :: Address -> String -> IO a
 addrBug addr msg = fail $ "VCache bug: address " ++ show addr ++ " " ++ msg
 
--- Primary code for updating the virtual memory. Will update existing
--- content and append new content. Returns the difference of reference 
--- counts between the old and new content (including zeroes for any
--- addresses seen but whose reference counts do not change)
+-- Since we only make one pass through memory, we need to maintain notes
+-- about the changes in content:
 --
--- By combining the reference counting with this operation, we avoid
--- two passes through memory (goal is to avoid unnecessary paging).
---
--- TODO: In addition to outputting a reference count diff, I also 
--- need to record (hash,address) pairs for any deleted VRefs. 
+--  * changes in reference counts from content
+--  * new references from `newPVar` (below allocator)
+--  * hash values for deleted VRefs
 -- 
-updateVirtualMemory :: VSpace -> MDB_txn -> Address -> WriteBatch -> IO RefctDiff
+-- That's it for now. I could separate these into multiple passes, but 
+-- one goal here is to minimize paging in case of large transactions.
+-- 
+type UpdateNotes = RefctDiff
+
+-- Update the memory table, and accumulate some information to help
+-- with updating reference counts and secondary indices. This pass 
+-- is responsible for deleting content selected for GC.
+--
+updateVirtualMemory :: VSpace -> MDB_txn -> Address -> WriteBatch -> IO UpdateNotes
 updateVirtualMemory vc txn allocStart fb = 
     if Map.null fb then return Map.empty else  
     alloca $ \ pAddr ->
@@ -279,29 +280,57 @@ updateVirtualMemory vc txn allocStart fb =
     cmem <- mdb_cursor_open' txn (vcache_db_memory vc) 
 
     -- logic inlined here for easy access to cursors and buffers
-    let af = compileWriteFlags [MDB_APPEND]
-    let newContent addr bytes = assert (not (BS.null bytes)) $  
-            withByteStringVal bytes $ \ vAllocData -> do
-            poke pAddr addr 
-            bOK <- mdb_cursor_put' af cmem vAddr vAllocData
-            unless bOK (addrBug addr "data could not be appended")
+
+    -- Deletion is marked as writing a null bytestring. Deleted values
+    -- must already be on disk or the GC wouldn't notice them. When a
+    -- VRef is deleted, we need to manage the hash.
+    -- 
+    -- if we delete something, it had better exist first.
     let df = compileWriteFlags []
-    let uf = compileWriteFlags [MDB_CURRENT]
-    let processCell rcs (addr, (bytes, newDeps)) =
-            let bAlloc = addr >= allocStart in
-            if bAlloc then newContent addr bytes >> return rcs else
-            withByteStringVal bytes $ \ vUpdData -> do
+    let delete rcs addr = do
             poke pAddr addr
-            bFound <- mdb_cursor_get' MDB_SET cmem pvAddr pvOldData
-            unless bFound (addrBug addr "undefined during update")
+            bExists <- mdb_cursor_get' MDB_SET cmem pvAddr pvOldData
+            unless bExists (addrBug addr "undefined on deletion")
+            when (isVRefAddr addr) (fail "VCache todo: delete: hash deleted VRefs")
             vOldData <- peek pvOldData
             oldDeps <- readDataDeps vc addr vOldData
-            let rcs' = addRefcts oldDeps rcs
-            let bDel = (0 == mv_size vUpdData)
-            if bDel then assert (L.null newDeps) $ mdb_cursor_del' df cmem
-                    else mdb_cursor_put' uf cmem vAddr vUpdData >>= \ bOK ->
-                         unless bOK (addrBug addr "data could not be updated")
-            return $! rcs'
+            mdb_cursor_del' df cmem
+            return $! addRefcts oldDeps rcs
+
+    -- when we can, we use MDB_APPEND to optimize writes to end of tree
+    let cf = compileWriteFlags [MDB_APPEND]
+    let create rcs addr bytes =   
+            withByteStringVal bytes $ \ vData -> do
+            poke pAddr addr 
+            bOK <- mdb_cursor_put' cf cmem vAddr vData
+            unless bOK (addrBug addr "could not be appended")
+            return rcs
+
+    -- for newPVar, our first write may be latent. In this case, we
+    -- must ensure the PVar is added to the refct tables.
+    let wf = compileWriteFlags []
+    let firstWrite rcs addr bytes =
+            withByteStringVal bytes $ \ vData -> do
+            bOK <- mdb_cursor_put' wf cmem vAddr vData
+            unless bOK (addrBug addr "newPVar could not be written")
+            fail "VCache todo: firstWrite: record address for refct table"
+
+    let uf = compileWriteFlags [MDB_CURRENT]
+    let update rcs addr bytes =
+            poke pAddr addr >>
+            mdb_cursor_get' MDB_SET cmem pvAddr pvOldData >>= \ bExists ->
+            if not bExists then firstWrite rcs addr bytes else 
+            withByteStringVal bytes $ \ vData -> do
+            oldDeps <- readDataDeps vc addr =<< peek pvOldData
+            bOK <- mdb_cursor_put' uf cmem vAddr vData
+            unless bOK (addrBug addr "PVar could not updated")
+            return $! addRefcts oldDeps rcs
+
+    let processCell rcs (addr, (bytes, deps')) =
+            if (BS.null bytes) then assert (L.null deps') $ delete rcs addr else    -- Deletions requested by collector
+            if (addr >= allocStart) then create rcs addr bytes else                 -- Allocations requested by allocator
+            if (isVRefAddr addr) then addrBug addr "written out of order" else      -- VRefs MUST be written by allocator
+            update rcs addr bytes                                                   -- Update, or first write for newPVar
 
     rcOld <- foldM processCell Map.empty (Map.toAscList fb)
     mdb_cursor_close' cmem

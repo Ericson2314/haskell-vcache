@@ -82,15 +82,16 @@ Library
     Database.VCache.Aligned
     Database.VCache.RWLock
     Database.VCache.Hash
+    Database.VCache.VGetAux
     Database.VCache.VGetInit
+    Database.VCache.VPutAux
     Database.VCache.VPutFini
-    Database.VCache.FromAddr
+    -- Database.VCache.Adjacency
     Database.VCache.Alloc
     Database.VCache.Read
     Database.VCache.Write
     Database.VCache.CacheClean
     Database.VCache.Refct
-    Database.VCache.VGetAux
    
   ghc-options: -Wall -auto-all
 

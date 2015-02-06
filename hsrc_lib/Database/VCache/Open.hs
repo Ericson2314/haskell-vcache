@@ -125,8 +125,7 @@ openVC' nBytes fl fp = do
 
         -- ephemeral resources
         let allocStart = nextAllocAddress allocEnd
-        allocator <- newIORef (freshAllocator allocStart)
-        collector <- newIORef freshCollector
+        memory <- newMVar (initMemory allocStart)
         tvWrites <- newTVarIO (Writes Map.empty [])
         mvSignal <- newMVar () 
         cLimit <- newIORef vcDefaultCacheLimit
@@ -154,13 +153,12 @@ openVC' nBytes fl fp = do
                     , vcache_db_caddrs = dbiHashes
                     , vcache_db_refcts = dbiRefct
                     , vcache_db_refct0 = dbiRefct0
-                    , vcache_allocator = allocator
-                    , vcache_collector = collector
+                    , vcache_memory = memory
                     , vcache_signal = mvSignal
                     , vcache_writes = tvWrites
                     , vcache_rwlock = rwLock
-                    , vcache_c_limit = cLimit
-                    , vcache_c_size = cSize
+                    , vcache_climit = cLimit
+                    , vcache_csize = cSize
                     , vcache_signal_writes = updWriteCt ctWrites
                     , vcache_ct_writes = ctWrites
                     , vcache_alloc_init = allocStart
@@ -190,13 +188,13 @@ findLastAddrAllocated txn dbiMemory = alloca $ \ pKey ->
     if bBadSize then fail "VCache memory table corrupted" else
     peekAligned (castPtr (mv_data key)) 
 
-freshAllocator :: Address -> Allocator
-freshAllocator addr =
-    let f0 = AllocFrame Map.empty Map.empty addr in
-    Allocator addr f0 f0 f0 addr
-
-freshCollector :: Collector
-freshCollector = Collector Map.empty Map.empty Map.empty Map.empty
+-- initialize memory based on initial allocation position
+initMemory :: Address -> Memory
+initMemory addr = m0 where
+    af = AllocFrame Map.empty Map.empty addr
+    ac = Allocator addr af af af
+    gc = GC Map.empty Map.empty
+    m0 = Memory Map.empty Map.empty gc ac
 
 -- Update write counts.
 updWriteCt :: IORef WriteCt -> Writes -> IO ()

@@ -12,74 +12,27 @@ module Database.VCache.VPut
     , putWord64le, putWord64be
     , putStorable
     , putVarNat, putVarInt
-    , reserve, unsafePutWord8
+    , reserve, reserving, unsafePutWord8
     , putByteString, putByteStringLazy
     , putc
     ) where
 
-import Control.Applicative
-
 import Data.Bits
 import Data.Char
 import Data.Word
-import Data.IORef
-import Foreign.Ptr (plusPtr,minusPtr,castPtr)
+import Foreign.Ptr (plusPtr,castPtr)
 import Foreign.Storable (Storable(..))
-import Foreign.Marshal.Alloc (reallocBytes)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.ForeignPtr (withForeignPtr)
 
-import qualified Data.List as L
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Lazy as LBS
 
 import Database.VCache.Types
 import Database.VCache.Aligned
+import Database.VCache.VPutAux
 -- import Database.VCache.Impl
-
--- | Ensure that at least N bytes are available for storage without
--- growing the underlying buffer. Use this before unsafePutWord8 
--- and similar operations. If the buffer must grow, it will grow
--- exponentially to ensure amortized constant allocation costs.
-reserve :: Int -> VPut ()
-reserve n = VPut $ \ s ->
-    let avail = vput_limit s `minusPtr` vput_target s in
-    if (avail >= n) then return (VPutR () s) 
-                    else VPutR () <$> grow n s 
-{-# INLINE reserve #-}
-
-grow :: Int -> VPutS -> IO VPutS
-grow n s =
-    readIORef (vput_buffer s) >>= \ pBuff ->
-    let currSize = vput_limit s `minusPtr` pBuff in
-    let bytesUsed = vput_target s `minusPtr` pBuff in
-    -- heuristic exponential growth
-    let bytesNeeded = (2 * currSize) + n + 1000 in 
-    reallocBytes pBuff bytesNeeded >>= \ pBuff' ->
-    -- (realloc will throw if it fails)
-    writeIORef (vput_buffer s) pBuff' >>
-    let target' = pBuff' `plusPtr` bytesUsed in
-    let limit' = pBuff' `plusPtr` bytesNeeded in
-    return $ s
-        { vput_target = target'
-        , vput_limit = limit'
-        }
-
--- | Store an 8 bit word.
-putWord8 :: Word8 -> VPut ()
-putWord8 w8 = reserving 1 $ unsafePutWord8 w8
-{-# INLINE putWord8 #-}
-
--- | Store an 8 bit word *assuming* enough space has been reserved.
--- This can be used safely together with 'reserve'.
-unsafePutWord8 :: Word8 -> VPut ()
-unsafePutWord8 w8 = VPut $ \ s -> 
-    let pTgt = vput_target s in
-    let s' = s { vput_target = (pTgt `plusPtr` 1) } in
-    poke pTgt w8 >>
-    return (VPutR () s')
-{-# INLINE unsafePutWord8 #-}
 
 -- | Store a reference to a value. The value reference must already
 -- use the same VCache and addres space as where you're putting it.
@@ -131,12 +84,6 @@ putWord64le, putWord64be :: Word64 -> VPut ()
 -- and Data.Binary APIs. I expect to use variable-sized integers
 -- and such much more frequently.
 
-reserving :: Int -> VPut a -> VPut a
-reserving n op = reserve n >> op
-{-# RULES
-"reserving >> reserving" forall n1 n2 f g . reserving n1 f >> reserving n2 g = reserving (n1+n2) (f>>g)
- #-}
-{-# INLINABLE reserving #-}
 
 putWord16le w = reserving 2 $ VPut $ \ s -> do
     let p = vput_target s
@@ -217,48 +164,6 @@ putStorable a =
         pokeAligned (castPtr pTgt) a
         return (VPutR () s')
 {-# INLINABLE putStorable #-}
-
--- | Put an arbitrary integer in a 'varint' format associated with
--- Google protocol buffers with zigzag encoding of negative numbers.
--- This takes one byte for values -64..63, two bytes for -8k..8k, 
--- three bytes for -1M..1M, etc.. Very useful if most numbers are
--- near 0.
-putVarInt :: Integer -> VPut ()
-putVarInt = _putVarNat . zigZag
-{-# INLINE putVarInt #-}
-
-zigZag :: Integer -> Integer
-zigZag n | (n < 0)   = (negate n * 2) - 1
-         | otherwise = (n * 2)
-{-# INLINE zigZag #-}
-
--- | Put an arbitrary non-negative integer in 'varint' format associated
--- with Google protocol buffers. This takes one byte for values 0..127,
--- two bytes for 128..16k, etc.. Will fail if given a negative argument.
-putVarNat :: Integer -> VPut ()
-putVarNat n | (n < 0)   = fail $ "putVarNat with " ++ show n
-            | otherwise = _putVarNat n
-{-# INLINE putVarNat #-}
-
-_putVarNat :: Integer -> VPut ()
-_putVarNat n =
-    let lBytes = _varNatBytes n in
-    reserving (L.length lBytes) $
-    mapM_ unsafePutWord8 lBytes
-
-_varNatBytes :: Integer -> [Word8]
-_varNatBytes n = 
-    let (q,r) = n `divMod` 128 in
-    let loByte = fromIntegral r in
-    _varNatBytes' [loByte] q
-{-# INLINE _varNatBytes #-}
-
-_varNatBytes' :: [Word8] -> Integer -> [Word8]
-_varNatBytes' out 0 = out
-_varNatBytes' out n = 
-    let (q,r) = n `divMod` 128 in
-    let byte = 128 + fromIntegral r in
-    _varNatBytes' (byte:out) q 
 
 -- | Put the contents of a bytestring directly. Unlike the 'put' method for
 -- bytestrings, this does not include size information; just raw bytes.

@@ -61,7 +61,7 @@ getVarInt = unZigZag <$> getVarNat
 
 -- undo protocol buffers zigzag encoding
 unZigZag :: Integer -> Integer
-unZigZag n =
+unZigZag !n =
     let (q,r) = n `divMod` 2 in
     if (1 == r) then negate q - 1
                 else q

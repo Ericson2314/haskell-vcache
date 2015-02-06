@@ -1,4 +1,4 @@
-
+{-# LANGUAGE BangPatterns #-}
 
 module Database.VCache.VPutFini
     ( vputFini
@@ -7,16 +7,16 @@ module Database.VCache.VPutFini
     ) where
 
 import Control.Exception (onException)
-import Data.Bits
 import Data.IORef
 import Data.ByteString (ByteString)
 import Foreign.Ptr
 import Foreign.ForeignPtr
 import Foreign.Marshal.Alloc
-import Database.VCache.Types
-import Database.VCache.VPut
 import System.IO.Unsafe (unsafePerformIO)
 import qualified Data.ByteString.Internal as BSI
+
+import Database.VCache.Types
+import Database.VCache.VPutAux
 
 -- | When we're just about done with VPut, we really have one more
 -- task to perform: to output the address list for any contained 
@@ -67,28 +67,11 @@ putChildren (x:xs) =
 -- putChildren after the first, using offsets.
 putChildren' :: Address -> [PutChild] -> VPut ()
 putChildren' _ [] = return ()
-putChildren' prev (x:xs) = 
+putChildren' !prev (x:xs) = 
     let addrX = putChildAddr x in
     let offset = (fromIntegral addrX) - (fromIntegral prev) in
     putVarInt offset >>
     putChildren' addrX xs
-
-
--- write a varNat, but reversed (little-endian)
-putVarNatR :: Int -> VPut ()
-putVarNatR n = 
-    if (n < 0) then fail "non-negative size expected" else
-    let (q,r) = n `divMod` 128 in
-    putWord8 (fromIntegral r) >>
-    putVarNatR' q
-
--- put the high bytes for a var nat in reverse
-putVarNatR' :: Int -> VPut ()
-putVarNatR' n =
-    if (n < 1) then return () else
-    let (q,r) = n `divMod` 128 in
-    putWord8 (0x80 .|. fromIntegral r) >>
-    putVarNatR' q
 
 runVPutIO :: VSpace -> VPut a -> IO (a, ByteString, [PutChild])
 runVPutIO vs action = do

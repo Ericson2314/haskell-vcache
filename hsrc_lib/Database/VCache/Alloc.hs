@@ -1,39 +1,233 @@
 {-# LANGUAGE ForeignFunctionInterface, BangPatterns #-}
 
--- allocators for PVars and VRefs
+-- | Constructors and Allocators for VRefs and PVars.
+--
+-- This module is the nexus of a lot of concurrency concerns. VRefs
+-- are GC'd, but might concurrently be revived by structure sharing,
+-- so we arbitrate GC vs. revival.
+--
+-- New allocations might not be seen at the LMDB-layer by the older
+-- readers, so we must track recent allocations.
+--
+-- Because VRefs are frequently constructed by unsafePerformIO, none
+-- of these operations can use STM (excepting newTVarIO).
+--
+-- For now, I'm just using a global lock on these operations, via MVar.
+-- Since writes are also single-threaded, and serialization and such 
+-- can operate outside the lock, this shouldn't be a bottleneck. But 
+-- it might cause a little more context switching than desirable.
+-- 
 module Database.VCache.Alloc
-    ( loadRootPVar
-    , loadRootPVarIO
-    , newPVar
-    , newPVarIO
+    ( addr2vref
+    , addr2pvar
     , newVRefIO
     , newVRefIO'
+    , newPVars
+    , newPVarsIO
+    , loadRootPVar
+    , loadRootPVarIO
     ) where
 
 import Control.Exception
 import Control.Monad
+import Control.Applicative
 import Data.Word
 import Data.IORef
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.List as L
 import qualified Data.Map.Strict as Map
+import Data.Typeable
+
 import Foreign.C.Types
 import Foreign.Ptr
 import Foreign.Storable
 import Foreign.Marshal.Alloc
+
 import GHC.Conc (unsafeIOToSTM)
 import Control.Concurrent.MVar
-import System.IO.Unsafe (unsafePerformIO)
+import Control.Concurrent.STM.TVar 
+
+import System.Mem.Weak (Weak)
+import qualified System.Mem.Weak as Weak
+import System.IO.Unsafe
+import Unsafe.Coerce
 
 import Database.LMDB.Raw
 
 import Database.VCache.Types
-import Database.VCache.FromAddr
 import Database.VCache.Path
 import Database.VCache.Aligned
 import Database.VCache.VPutFini
 import Database.VCache.Hash
+
+import Database.VCache.Read
+import Database.VCache.RWLock
+
+-- | Obtain a VRef given an address and value. Not initially cached.
+--
+-- This operation will return Nothing if the requested address has
+-- been selected for garbage collection. Note that this operation 
+-- does not touch the LMDB-layer database.
+addr2vref :: (VCacheable a) => VSpace -> Address -> IO (VRef a)
+addr2vref vc addr = assert (isVRefAddr addr) $ _addr2vref undefined vc addr 
+{-# INLINABLE addr2vref #-}
+
+mbrun :: (Applicative m) => (a -> m (Maybe b)) -> Maybe a -> m (Maybe b)
+mbrun _ Nothing = pure Nothing
+mbrun op (Just a) = op a
+{-# INLINE mbrun #-}
+
+_addr2vref :: (VCacheable a) => a -> VSpace -> Address -> IO (VRef a)
+_addr2vref _dummy vc addr = modifyMVarMasked (vcache_memory vc) $ \ m -> do
+    let ty = typeOf _dummy
+    let em = mem_vrefs m
+    let mbf = Map.lookup addr em >>= Map.lookup ty
+    mbCache <- mbrun _getVREphCache mbf 
+    case mbCache of 
+        Just cache -> return (m, VRef addr cache vc get)
+        Nothing -> do
+            cache <- newIORef NotCached
+            wkCache <- mkWeakIORef cache (return ())
+            let e  = VREph addr ty wkCache
+            let m' = m { mem_vrefs = addVREph e em }
+            m' `seq` return (m', VRef addr cache vc get)
+{-# NOINLINE _addr2vref #-}
+
+addVREph :: VREph -> VREphMap -> VREphMap
+addVREph e = Map.alter (Just . maybe i0 ins) (vreph_addr e) where
+    ty = vreph_type e
+    i0 = Map.singleton ty e
+    ins = Map.insert ty e
+{-# INLINABLE addVREph #-}
+
+-- This is certainly an unsafe operation in general, but we have
+-- already validated the TypeRep matches.
+_getVREphCache :: VREph -> IO (Maybe (IORef (Cache a)))
+_getVREphCache = Weak.deRefWeak . _u where
+    _u :: VREph -> Weak (IORef (Cache a))
+    _u (VREph { vreph_cache = w }) = _c w 
+    _c :: Weak (IORef (Cache b)) -> Weak (IORef (Cache a))
+    _c = unsafeCoerce
+{-# INLINE _getVREphCache #-}
+
+-- | Obtain a PVar given an address. PVar will lazily load when read.
+-- This operation does not try to read the database.
+addr2pvar :: (VCacheable a) => VSpace -> Address -> IO (PVar a)
+addr2pvar vc addr = assert (isPVarAddr addr) $ _addr2pvar undefined vc addr
+{-# INLINE addr2pvar #-}
+
+_addr2pvar :: (VCacheable a) => a -> VSpace -> Address -> IO (PVar a)
+_addr2pvar _dummy vc addr = modifyMVarMasked (vcache_memory vc) $ \ m -> do
+    let ty = typeOf _dummy
+    let mpv = mem_pvars m
+    let mbf = Map.lookup addr mpv
+    mbVar <- (`mbrun` mbf) $ \ pve -> do
+        let tye = pveph_type pve 
+        unless (ty == tye) (fail $ eTypeMismatch addr ty tye)
+        _getPVEphTVar pve
+    case mbVar of
+        Just var -> return (m, PVar addr var vc put)
+        Nothing -> do
+            lzv <- unsafeInterleaveIO $ RDV . fst <$> readAddrIO vc addr get
+            var <- newTVarIO lzv
+            wkVar <- mkWeakTVar var (return ())
+            let e = PVEph addr ty wkVar
+            let m' = m { mem_pvars = addPVEph e mpv }
+            return (m', PVar addr var vc put)
+{-# NOINLINE _addr2pvar #-}
+
+eTypeMismatch :: Address -> TypeRep -> TypeRep -> String
+eTypeMismatch addr tyNew tyOld = 
+    showString "PVar user error: address " . shows addr .
+    showString " type mismatch on load. " .
+    showString " Existing: " . shows tyOld .
+    showString " Expecting: " . shows tyNew $ ""
+
+addPVEph :: PVEph -> PVEphMap -> PVEphMap
+addPVEph pve = Map.insert (pveph_addr pve) pve
+{-# INLINE addPVEph #-}
+
+-- unsafe: get data, assuming that type already matches.
+_getPVEphTVar :: PVEph -> IO (Maybe (TVar (RDV a)))
+_getPVEphTVar = Weak.deRefWeak . _u where
+    _u :: PVEph -> Weak (TVar (RDV a))
+    _u (PVEph { pveph_data = w }) = _c w
+    _c :: Weak (TVar (RDV b)) -> Weak (TVar (RDV a))
+    _c = unsafeCoerce
+{-# INLINE _getPVEphTVar #-}
+
+-- | Construct a new VRef and initialize cache with given value.
+newVRefIO :: (VCacheable a) => VSpace -> a -> CacheMode -> IO (VRef a)
+newVRefIO vc v cm = 
+    runVPutIO vc (put v) >>= \ ((), _data, _deps) ->
+    allocVRefIO vc _data _deps >>= \ vref ->
+    let w = cacheWeight (BS.length _data) (L.length _deps) in
+    initVRefCache vref v w cm >>= \ () ->
+    return vref
+{-# NOINLINE newVRefIO #-}
+
+-- | Construct a new VRef without initializing the cache.
+newVRefIO' :: (VCacheable a) => VSpace a -> IO (VRef a) 
+newVRefIO' vc v =
+    runVPutIO vc (put v) >>= \ ((), _data, _deps) ->
+    allocVRefIO vc _data _deps 
+{-# INLINE newVRefIO' #-}
+
+-- | initialize a VRef cache with a known value (no need to read the
+-- database). If the cache already exists, the existing value is not
+-- modified and the cache is touched with the requested cache mode.
+initVRefCache :: VRef a -> a -> Int -> CacheMode -> IO ()
+initVRefCache vref v w cm = atomicModifyIORef (vref_cache vref) $ \ c -> case c of
+    NotCached -> 
+        let c' = mkVRefCache v w cm in
+        c' `seq` (c', ())
+    Cached r b ->
+        let b' = touchCache cm b in
+        let c' = Cached r b' in
+        c' `seq` (c', ())
+{-# INLINABLE initVRefCache #-}
+
+-- | Allocate a VRef given data and dependencies.
+
+-- | Match existing structure in database. If not found, allocate one.
+allocVRefIO :: (VCacheable a) => VSpace -> ByteString -> [PutChild] -> IO (VRef a)
+allocVRefIO vc _data _deps = 
+    let _name = BS.take 8 $ hash _data in
+    withByteStringVal _name $ \ vName ->
+    withByteStringVal _data $ \ vData ->
+    withRdOnlyTxn vc $ \ txn ->
+    listDups' txn (vcache_db_caddrs vc) vName >>= \ caddrs ->
+    seek (matchCandidate vc txn vData) caddrs >>= \ mbFound ->
+    case mbFound of
+        Just !vref -> return vref
+        Nothing -> 
+            let acRef = vcache_allocator vc in
+            let allocFn = allocVRef _name _data _deps in
+            atomicModifyIORef acRef allocFn >>= \ !addr ->
+            addr2vref vc addr >>= \ mbv -> case mbv of
+                Nothing -> fail $ "VRef bug: must not GC recent allocations!"
+                Just !vref -> signalAlloc vc >> return vref 
+{-# NOINLINE allocVRefIO #-}
+
+
+
+-- | Construct a new PVar within a VTx transaction. Nothing will be
+-- written to disk regarding this PVar until the transaction completes. 
+-- 
+newPVar = error "TODO: newPVar"
+
+-- | Construct multiple PVars within a VTx transaction. Nothing will
+-- be written to disk 
+newPVars = error "TODO: newPVars"
+newPVarIO = error "TODO: newPVarIO"
+newPVarsIO = error "TODO: newPVarsIO"
+loadRootPVar = error "TODO: loadRootPVar"
+loadRootPVarIO = error "TODO: loadRootPVarIO"
+
+{-
+
+
 
 
 -- | load a root PVar immediately, in the IO monad. This can be more
@@ -170,54 +364,7 @@ allocPVarVTx ac =
     let ac' = ac { alloc_new_addr = 2 + newAddr } in
     (ac', pvAddr)
    
--- | Construct a VRef then initialize the cache. 
--- Or touch the cache if it already exists.
-newVRefIO :: (VCacheable a) => VSpace -> a -> CacheMode -> IO (VRef a)
-newVRefIO vc v cm =
-    runVPutIO vc (put v) >>= \ ((), _data, _deps) ->
-    allocVRefIO vc _data _deps >>= \ vref ->
-    let w = cacheWeight (BS.length _data) (L.length _deps) in
-    initVRefCache vref v w cm >>= \ () ->
-    return vref
-{-# NOINLINE newVRefIO #-}
 
-initVRefCache :: VRef a -> a -> Int -> CacheMode -> IO ()
-initVRefCache vref v w cm = atomicModifyIORef (vref_cache vref) $ \ c -> case c of
-    NotCached -> 
-        let c' = mkVRefCache v w cm in
-        c' `seq` (c', ())
-    Cached r b ->
-        let b' = touchCache cm b in
-        let c' = Cached r b' in
-        c' `seq` (c', ())
-{-# INLINABLE initVRefCache #-}
-
--- | Construct a VRef with initially empty cache (if new)
-newVRefIO' :: (VCacheable a) => VSpace -> a -> IO (VRef a)
-newVRefIO' vc v = 
-    runVPutIO vc (put v) >>= \ ((), _data, _deps) ->
-    allocVRefIO vc _data _deps
-{-# INLINABLE newVRefIO' #-}
-
--- | Match existing structure in database. If not found, allocate one.
-allocVRefIO :: (VCacheable a) => VSpace -> ByteString -> [PutChild] -> IO (VRef a)
-allocVRefIO vc _data _deps = 
-    let _name = BS.take 8 $ hash _data in
-    withByteStringVal _name $ \ vName ->
-    withByteStringVal _data $ \ vData ->
-    withRdOnlyTxn vc $ \ txn ->
-    listDups' txn (vcache_db_caddrs vc) vName >>= \ caddrs ->
-    seek (matchCandidate vc txn vData) caddrs >>= \ mbFound ->
-    case mbFound of
-        Just !vref -> return vref
-        Nothing -> 
-            let acRef = vcache_allocator vc in
-            let allocFn = allocVRef _name _data _deps in
-            atomicModifyIORef acRef allocFn >>= \ !addr ->
-            addr2vref vc addr >>= \ mbv -> case mbv of
-                Nothing -> fail $ "VRef bug: must not GC recent allocations!"
-                Just !vref -> signalAlloc vc >> return vref 
-{-# NOINLINE allocVRefIO #-}
    
 seek :: (Monad m) => (a -> m (Maybe b)) -> [a] -> m (Maybe b)
 seek _ [] = return Nothing
@@ -313,3 +460,6 @@ signalAlloc vc = void $ tryPutMVar (vcache_signal vc) ()
 
 foreign import ccall unsafe "string.h memcmp" c_memcmp
     :: Ptr Word8 -> Ptr Word8 -> CSize -> IO CInt
+
+
+-}

@@ -1,4 +1,4 @@
-
+{-# LANGUAGE BangPatterns #-}
 
 module Database.VCache.VGetInit
     ( vgetInit
@@ -55,10 +55,10 @@ readAddrBytes = readAddrBytes' 0
 {-# INLINE readAddrBytes #-}
 
 readAddrBytes' :: Int -> VGet Int
-readAddrBytes' nAccum = 
+readAddrBytes' !nAccum = 
     getWord8FromEnd >>= \ w8 ->
-    let nAccum' = (128 * nAccum) + (fromIntegral (0x7f .&. w8)) in
-    if (w8 < 0x80) then return nAccum' else
+    let nAccum' = (nAccum `shiftL` 7) .|. (fromIntegral (0x7f .&. w8)) in
+    if (w8 < 0x80) then return $! nAccum' else
     readAddrBytes' nAccum'
 
 -- read a variable list of at least one address
@@ -70,7 +70,7 @@ readAddrs =
 
 -- read address offsets until end of input
 readAddrs' :: [Address] -> Integer -> VGet [Address]
-readAddrs' addrs nLast =
+readAddrs' addrs !nLast =
     isEmpty >>= \ bEmpty ->
     if bEmpty then return addrs else
     getVarInt >>= \ nOff ->

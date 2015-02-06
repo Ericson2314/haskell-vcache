@@ -40,7 +40,7 @@ import qualified Data.ByteString.Lazy as LBS
 
 import Database.VCache.Types
 import Database.VCache.Aligned
-import Database.VCache.FromAddr
+import Database.VCache.Alloc
 import Database.VCache.VGetAux 
 
 -- | isolate a parser to a subset of bytes and value references. The
@@ -83,34 +83,38 @@ takeExact' l n (r:rs) = takeExact' (r:l) (n-1) rs
 takeExact' _ _ _ = Nothing
 
 -- | Load a VRef, just the reference rather than the content. User must
--- know which type of value. VRef content is not read until deref. 
+-- know the type of the value, since getVRef is essentially a typecast.
+-- VRef content is not read until deref. 
+--
+-- All instances of a VRef with the same type and address will share the
+-- same cache.
 getVRef :: (VCacheable a) => VGet (VRef a)
 getVRef = VGet $ \ s -> 
     case (vget_children s) of
         (c:cs) | isVRefAddr c -> do
             let s' = s { vget_children = cs }
-            mbr <- addr2vref (vget_space s) c
-            case mbr of
-                Just r -> return (VGetR r s')
-                Nothing -> fail $ "VCache bug: parsed GC'd VRef#" ++ show c 
-        _ -> return (VGetE "could not parse value reference")
+            vref <- addr2vref (vget_space s) c
+            return (VGetR vref s')
+        _ -> return (VGetE "getVRef")
 {-# INLINABLE getVRef #-}
 
 -- | Load a PVar, just the variable. Content is loaded lazily on first
 -- read, then kept in memory until the PVar is GC'd. Unlike other Haskell
--- variables, PVars can be serialized to the VCache address space.  
+-- variables, PVars can be serialized to the VCache address space. All 
+-- PVars for a specific address are collapsed, using the same TVar.
 --
--- A PVar may be loaded more than once. All instances refer to the same
--- underlying TVar. All instances of a PVar must have the same TypeRep
--- (via Data.Typeable) or a runtime error will be raised.
+-- Developers must know the type of the PVar, since getPVar will cast to
+-- any cacheable type. A runtime error is raised only if you attempt to
+-- load the same PVar address with two different types.
+--
 getPVar :: (VCacheable a) => VGet (PVar a) 
 getPVar = VGet $ \ s ->
     case (vget_children s) of
         (c:cs) | isPVarAddr c -> do
             let s' = s { vget_children = cs }
-            r <- addr2pvar (vget_space s) c
-            return (VGetR r s')
-        _ -> return (VGetE "could not parse persistent variable id")
+            pvar <- addr2pvar (vget_space s) c
+            return (VGetR pvar s')
+        _ -> return (VGetE "getPVar")
 {-# INLINABLE getPVar #-}
 
 -- | Read words of size 16, 32, or 64 in little-endian or big-endian.

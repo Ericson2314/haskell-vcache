@@ -11,9 +11,9 @@ module Database.VCache.PVar
     , modifyPVar
     , modifyPVar'
     , swapPVar
+    , pvar_space
     , unsafePVarAddr
     , unsafePVarRefct
-    , pvar_space
     ) where
 
 import Control.Concurrent.STM
