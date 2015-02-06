@@ -2,6 +2,7 @@
 module Database.VCache.PVar
     ( PVar
     , newPVar
+    , newPVars
     , newPVarIO
     , loadRootPVar
     , loadRootPVarIO

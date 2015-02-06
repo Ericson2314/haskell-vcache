@@ -22,8 +22,9 @@ module Database.VCache.Alloc
     , addr2pvar
     , newVRefIO
     , newVRefIO'
+    , newPVar
     , newPVars
-    , newPVarsIO
+    , newPVarIO
     , loadRootPVar
     , loadRootPVarIO
     ) where
@@ -163,9 +164,19 @@ newVRefIO vc v cm =
     runVPutIO vc (put v) >>= \ ((), _data, _deps) ->
     allocVRefIO vc _data _deps >>= \ vref ->
     let w = cacheWeight (BS.length _data) (L.length _deps) in
-    initVRefCache vref v w cm >>= \ () ->
+    atomicModifyIORef (vref_cache vref) (initVRefCache v w cm) >>= \ () ->
     return vref
 {-# NOINLINE newVRefIO #-}
+
+-- | initialize a VRef cache with a known value (no need to read the
+-- database). If the cache already exists, the existing value is not
+-- modified and the cache is touched with the requested cache mode.
+initVRefCache :: a -> Int -> CacheMode -> Cached a -> (Cached a, ())
+initVRefCache v w cm c = (c', c' `seq` ()) where
+    c' = case c of 
+        NotCached -> mkVRefCache v w cm
+        Cached r b -> Cached r (touchCache cm b) 
+{-# INLINE initVRefCache #-}
 
 -- | Construct a new VRef without initializing the cache.
 newVRefIO' :: (VCacheable a) => VSpace a -> IO (VRef a) 
@@ -174,26 +185,15 @@ newVRefIO' vc v =
     allocVRefIO vc _data _deps 
 {-# INLINE newVRefIO' #-}
 
--- | initialize a VRef cache with a known value (no need to read the
--- database). If the cache already exists, the existing value is not
--- modified and the cache is touched with the requested cache mode.
-initVRefCache :: VRef a -> a -> Int -> CacheMode -> IO ()
-initVRefCache vref v w cm = atomicModifyIORef (vref_cache vref) $ \ c -> case c of
-    NotCached -> 
-        let c' = mkVRefCache v w cm in
-        c' `seq` (c', ())
-    Cached r b ->
-        let b' = touchCache cm b in
-        let c' = Cached r b' in
-        c' `seq` (c', ())
-{-# INLINABLE initVRefCache #-}
-
 -- | Allocate a VRef given data and dependencies.
-
--- | Match existing structure in database. If not found, allocate one.
+--
+-- We'll try to find an existing match in the database, modulo those 
+-- in the GC lists. If such a match is discovered, we'll reuse the 
+-- existing address. Otherwise, we allocate a new one.
+--
 allocVRefIO :: (VCacheable a) => VSpace -> ByteString -> [PutChild] -> IO (VRef a)
 allocVRefIO vc _data _deps = 
-    let _name = BS.take 8 $ hash _data in
+    let _name = hash _data in
     withByteStringVal _name $ \ vName ->
     withByteStringVal _data $ \ vData ->
     withRdOnlyTxn vc $ \ txn ->
@@ -221,7 +221,6 @@ newPVar = error "TODO: newPVar"
 -- be written to disk 
 newPVars = error "TODO: newPVars"
 newPVarIO = error "TODO: newPVarIO"
-newPVarsIO = error "TODO: newPVarsIO"
 loadRootPVar = error "TODO: loadRootPVar"
 loadRootPVarIO = error "TODO: loadRootPVarIO"
 

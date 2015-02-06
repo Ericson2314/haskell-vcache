@@ -90,7 +90,7 @@ Library
     Database.VCache.Alloc
     Database.VCache.Read
     Database.VCache.Write
-    Database.VCache.CacheClean
+    Database.VCache.Clean
     Database.VCache.Refct
    
   ghc-options: -Wall -auto-all

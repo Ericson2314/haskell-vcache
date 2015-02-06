@@ -29,8 +29,8 @@ import Database.LMDB.Raw
 import Database.VCache.Types 
 import Database.VCache.RWLock
 import Database.VCache.Aligned
-import Database.VCache.Write -- Writer step
-import Database.VCache.CacheClean -- Cache manager
+import Database.VCache.Write
+import Database.VCache.Clean 
 
 
 
@@ -105,8 +105,15 @@ vcAllocStart = 999999999
 vcDefaultCacheLimit :: Int
 vcDefaultCacheLimit = 10 * 1024 * 1024 
 
+-- Checking for a `-threaded` runtime
+threaded :: Bool
+threaded = rtsSupportsBoundThreads
+
 openVC' :: Int -> FileLock -> FilePath -> IO VCache
 openVC' nBytes fl fp = do
+    
+    unless threaded (fail "VCache needs -threaded runtime")
+
     dbEnv <- mdb_env_create
     mdb_env_set_mapsize dbEnv nBytes
     mdb_env_set_maxdbs dbEnv 5
@@ -127,7 +134,7 @@ openVC' nBytes fl fp = do
         let allocStart = nextAllocAddress allocEnd
         memory <- newMVar (initMemory allocStart)
         tvWrites <- newTVarIO (Writes Map.empty [])
-        mvSignal <- newMVar () 
+        mvSignal <- newEmptyMVar
         cLimit <- newIORef vcDefaultCacheLimit
         cSize <- newIORef 0
         ctWrites <- newIORef $ WriteCt 0 0 0
@@ -193,7 +200,7 @@ initMemory :: Address -> Memory
 initMemory addr = m0 where
     af = AllocFrame Map.empty Map.empty addr
     ac = Allocator addr af af af
-    gc = GC Map.empty Map.empty
+    gc = GC Map.empty Map.empty Map.empty
     m0 = Memory Map.empty Map.empty gc ac
 
 -- Update write counts.
@@ -209,13 +216,13 @@ updWriteCt var w = modifyIORef' var $ \ wct ->
 initVCacheThreads :: VSpace -> IO ()
 initVCacheThreads vc = begin where
     begin = do
-        task (writerStep vc)
-        task (cleanCache vc)
+        task (writeStep vc)
+        task (cleanStep vc)
     task step = void (forkIO (forever step `catch` onE))
     onE :: SomeException -> IO ()
     onE e | isBlockedOnMVar e = return () -- full GC of VCache
     onE e = do
-        putErrLn "VCache writer thread has failed."
+        putErrLn "VCache background thread has failed."
         putErrLn (indent "  " (show e))
         putErrLn "Halting program."
         Sys.exitFailure
@@ -233,8 +240,4 @@ indent ws = (ws ++) . indent' where
     indent' ('\n':s) = '\n' : ws ++ indent' s
     indent' (c:s) = c : indent' s
     indent' [] = []
-
-
-
-
 

@@ -27,33 +27,33 @@ runVTx' :: VSpace -> MVar () -> VTx a -> STM (IO a)
 runVTx' vc mvWait action = 
     let s0 = VTxState vc Map.empty False in
     runStateT (_vtx action) s0 >>= \ (r,s) ->
-    -- early exit for read-only, non-durable actions
+    -- fast path for read-only, non-durable actions
     let bWrite = not (Map.null (vtx_writes s)) in
     let bSync = vtx_durable s in
     let bDone = not (bWrite || bSync) in
     if bDone then return (return r) else
-    -- otherwise, we must update the shared queue
+    -- otherwise, we update shared queue w/ potential conflicts
     readTVar (vcache_writes vc) >>= \ w ->
     let wdata' = updateLog (vtx_writes s) (write_data w) in
     let wsync' = updateSync bSync mvWait (write_sync w) in
     let w' = Writes { write_data = wdata', write_sync = wsync' } in
     writeTVar (vcache_writes vc) w' >>= \ () ->
     return $ w' `seq` do
-        signalWriter vc
+        signalWriter vc 
         when bSync (takeMVar mvWait)
         return r
 
--- signal the writer thread of new work to do
-signalWriter :: VSpace -> IO ()
+-- Signal the writer of work to do.
+signalWriter :: VSpace  -> IO ()
 signalWriter vc = void (tryPutMVar (vcache_signal vc) ())
 {-# INLINE signalWriter #-}
 
--- keep the most recent writes for each PVar, allowing older
--- data to be GC'd.
+-- Record recent writes for each PVar.
 updateLog :: WriteLog -> WriteLog -> WriteLog
 updateLog updates writeLog = Map.union updates writeLog 
 {-# INLINE updateLog #-}
 
+-- Track which threads are waiting on a commit signal.
 updateSync :: Bool -> MVar () -> [MVar ()] -> [MVar ()]
 updateSync bSync v = if bSync then (v:) else id
 {-# INLINE updateSync #-}

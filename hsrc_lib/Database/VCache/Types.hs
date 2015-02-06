@@ -12,10 +12,10 @@ module Database.VCache.Types
     , VGet(..), VGetS(..), VGetR(..)
     , VCacheable(..)
     , Allocator(..), AllocFrame(..), Allocation(..)
-    , GC(..), Memory(..)
+    , GC(..), GCFrame
+    , Memory(..)
     , VTx(..), VTxState(..), TxW(..), VTxBatch(..)
     , Writes(..), WriteLog, WriteCt(..)
-    , WriteBatch, WriteCell
 
     -- misc. utilities
     , allocFrameSearch
@@ -354,17 +354,13 @@ allocFrameSearch f a = f n <|> f c <|> f p where
     p = alloc_frm_prev a
 
 -- | In addition to recent allocations, we track garbage collection.
--- The goal is to prevent revival of VRefs after we decide they are
--- dead. When a thread constructs a VRef, it may find the VRef via 
--- the content addressed hashmap at almost the same time background 
--- GC thread selects that address for destruction.
+-- The goal here is to prevent revival of VRefs after we decide to
+-- delete them. So, when we try to allocate a VRef, we'll check to
+-- see if it's address has been targeted for deletion.
 --
--- So we have a race condition: either the VRef constructor wins and
--- we'll add the address to the VREphMap, or the GC thread wins and we
--- record the address in the GC frame. If the GC thread wins, we will
--- need to allocate the VRef anew.
--- 
--- No mechanism exists to revive PVars, so those are a non-issue.
+-- As with allocation frames, we have three GC frames. This allows
+-- a thread separate from the writer to perform GC incrementally,
+-- with the writer simply processing GC contents.
 --
 -- Similar to the allocator, we'll track these in 'frames', relying
 -- on the RWLock to limit how many frames a reader falls behind. But
@@ -372,7 +368,8 @@ allocFrameSearch f a = f n <|> f c <|> f p where
 -- writer selects addresses for GC.
 --
 data GC = GC 
-    { gc_frm_curr :: !GCFrame
+    { gc_frm_next :: !GCFrame
+    , gc_frm_curr :: !GCFrame
     , gc_frm_prev :: !GCFrame
     } 
 type GCFrame = Map Address ()
@@ -381,7 +378,8 @@ type GCFrame = Map Address ()
     -- intersection operations. 
 
 recentGC :: GC -> Address -> Bool
-recentGC gc addr = Map.member addr (gc_frm_curr gc)
+recentGC gc addr = Map.member addr (gc_frm_next gc)
+                || Map.member addr (gc_frm_curr gc)
                 || Map.member addr (gc_frm_prev gc)
 {-# INLINE recentGC #-}
 
@@ -470,23 +468,15 @@ data Writes = Writes
     { write_data :: !WriteLog
     , write_sync :: ![MVar ()]
     }
+    -- Design Thoughts: It might be worthwhile to separate the writelog
+    -- and synchronization, i.e. to potentially reduce conflicts between
+    -- transactions. But I'll leave this to later.
+
 data WriteCt = WriteCt
     { wct_frames :: {-# UNPACK #-} !Int -- how many write frames
     , wct_pvars  :: {-# UNPACK #-} !Int -- how many PVars written
     , wct_sync   :: {-# UNPACK #-} !Int -- how many sync requests
     }
-
--- | A batch of updates to perform on memory, including dependencies
--- to incref. 
---
--- Note: if a WriteCell has a null ByteString, this means we'll delete
--- the content. Empty bytestring is impossible as output from VPut
--- because we have at least a size for the child list.
-type WriteBatch = Map Address WriteCell
-type WriteCell = (ByteString, [PutChild])
-
-
-
 
 data VTxBatch = VTxBatch SyncOp WriteLog 
 type SyncOp = IO () -- called after write is synchronized.
