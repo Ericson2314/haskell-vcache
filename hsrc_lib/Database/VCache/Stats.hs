@@ -22,6 +22,7 @@ data VCacheStats = VCacheStats
         , vcstat_root_count     :: {-# UNPACK #-} !Int  -- ^ number of named roots (a subset of PVars)
         , vcstat_mem_vref       :: {-# UNPACK #-} !Int  -- ^ number of VRefs in Haskell process memory
         , vcstat_mem_pvar       :: {-# UNPACK #-} !Int  -- ^ number of PVars in Haskell process memory
+        , vcstat_eph_count      :: {-# UNPACK #-} !Int  -- ^ number of addresses with zero references
         , vcstat_alloc_pos      :: {-# UNPACK #-} !Address -- ^ address to next be used by allocator
         , vcstat_alloc_count    :: {-# UNPACK #-} !Int  -- ^ number of allocations by this process 
         , vcstat_gc_count       :: {-# UNPACK #-} !Int  -- ^ number of addresses GC'd by this process
@@ -43,6 +44,7 @@ vcacheStats (VCache vc _) = withRdOnlyTxn vc $ \ txnStat -> do
     dbMemStat <- mdb_stat' txnStat (vcache_db_memory vc)
     rootStat <- mdb_stat' txnStat (vcache_db_vroots vc)
     hashStat <- mdb_stat' txnStat (vcache_db_caddrs vc)
+    ephStat <- mdb_stat' txnStat (vcache_db_refct0 vc)
     memory <- readMVar (vcache_memory vc)
     cTgtLim <- readIORef (vcache_climit vc)
     cSize <- readIORef (vcache_csize vc)
@@ -53,6 +55,7 @@ vcacheStats (VCache vc _) = withRdOnlyTxn vc $ \ txnStat -> do
                  * (fromIntegral $ ms_psize envStat)
     let vrefCount = (fromIntegral $ ms_entries hashStat) 
     let pvarCount = (fromIntegral $ ms_entries dbMemStat) - vrefCount
+    let ephCount = (fromIntegral $ ms_entries ephStat)
     let rootCount = (fromIntegral $ ms_entries rootStat)
     let memVRefsCount = Map.foldl' (\ a b -> a + Map.size b) 0 (mem_vrefs memory)
     let memPVarsCount = Map.size (mem_pvars memory)
@@ -66,6 +69,7 @@ vcacheStats (VCache vc _) = withRdOnlyTxn vc $ \ txnStat -> do
         , vcstat_root_count = rootCount
         , vcstat_mem_vref = memVRefsCount
         , vcstat_mem_pvar = memPVarsCount
+        , vcstat_eph_count = ephCount
         , vcstat_alloc_pos = allocPos
         , vcstat_alloc_count = allocCount
         , vcstat_cache_target = cTgtLim

@@ -2,8 +2,8 @@
 
 -- | Limited cache control.
 module Database.VCache.Cache
-    ( setVCacheSize
-    , clearVCache
+    ( setVRefsCacheSize
+    , clearVRefsCache
     ) where
 
 import Control.Applicative ((<$>))
@@ -35,21 +35,18 @@ import Database.VCache.Types
 -- VRef layer caching, i.e. using vref' and deref', and instead rely 
 -- on just the page cache.
 --
-setVCacheSize :: VSpace -> Int -> IO ()
-setVCacheSize = writeIORef . vcache_climit
-{-# INLINE setVCacheSize #-}
+setVRefsCacheSize :: VSpace -> Int -> IO ()
+setVRefsCacheSize = writeIORef . vcache_climit
+{-# INLINE setVRefsCacheSize #-}
 
--- | clearVCache will iterate over the VRefs in Haskell memory at 
--- the time of the call, and clear the cache for each of them.
---
--- This operation isn't recommended for common use, since it can
--- interfere with different subprograms and threads. But it may
--- be useful for some applications.
-clearVCache :: VSpace -> IO ()
-clearVCache vc = do
+-- | clearVRefsCache will iterate over all VRefs in Haskell memory at 
+-- the time of the call, clearing the cache for each of them. This 
+-- operation isn't recommended for common use.
+clearVRefsCache :: VSpace -> IO ()
+clearVRefsCache vc = do
     ephMap <- mem_vrefs <$> readMVar (vcache_memory vc)
     mapM_ (mapM_ clearVREphCache . Map.elems) (Map.elems ephMap)
-{-# INLINABLE clearVCache #-}
+{-# INLINABLE clearVRefsCache #-}
 
 clearVREphCache :: VREph -> IO ()
 clearVREphCache (VREph { vreph_cache = wc }) =   
@@ -57,4 +54,15 @@ clearVREphCache (VREph { vreph_cache = wc }) =
     case mbCache of
         Nothing -> return ()
         Just cache -> writeIORef cache NotCached
+
+
+-- | Immediately clear the cache associated with a VRef, allowing 
+-- any contained data to be GC'd. Normally, VRef cached values are
+-- cleared either by a background thread (depending on modes and 
+-- heuristics) or when the VRef itself is garbage collected from
+-- Haskell memory. 
+clearVRefCache :: VRef a -> IO ()
+clearVRefCache v = writeIORef (vref_cache v) NotCached
+{-# INLINE clearVRefCache #-}
+
 

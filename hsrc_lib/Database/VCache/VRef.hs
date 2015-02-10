@@ -2,13 +2,13 @@
 
 module Database.VCache.VRef
     ( VRef
-    , vref, vref', vrefc
-    , deref, deref', derefc
+    , vref, deref
+    , vref', deref'
     , unsafeVRefAddr
     , unsafeVRefRefct
     , vref_space
-    , clearVRef
     , CacheMode(..)
+    , vrefc, derefc
     ) where
 
 import Control.Monad
@@ -117,17 +117,6 @@ unsafeVRefAddr = vref_addr
 unsafeVRefRefct :: VRef a -> IO Int
 unsafeVRefRefct v = readRefctIO (vref_space v) (vref_addr v) 
 {-# INLINE unsafeVRefRefct #-}
-
--- | Immediately clear the cache associated with a VRef, allowing 
--- any contained data to be GC'd. 
---
--- If developers don't clear the cache explicitly, it will usually
--- be cleared either by a background thread or when the VRef itself
--- is garbage collected by the Haskell process. In most cases, it is
--- better to leave the cache management to these implicit processes.
-clearVRef :: VRef a -> IO ()
-clearVRef v = writeIORef (vref_cache v) NotCached
-{-# INLINE clearVRef #-}
 
 
 

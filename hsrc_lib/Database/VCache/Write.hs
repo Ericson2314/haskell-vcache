@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+
 -- Implementation of the Writer threads.
 --
 -- Some general design goals here:
@@ -6,15 +8,16 @@
 --   Single read/write pass per database per frame
 --   Append newly written content when possible
 --
--- An exception to the single pass is the refct0 database. But this
--- database should be smaller than the in-RAM ephemeron tables under
--- normal conditions, assuming GC is working. 
+-- An exception to the single pass is the db_refct0 table, for which
+-- I'll make a few passes. However, assuming GC is working, db_refct0
+-- should be smaller than the in-memory ephemeron tables. So this 
+-- should not create any significant paging burden.
 --
--- The writer thread also handles the GC algorithm. This simplifies
--- reasoning about concurrency, in particular the issue where VRefs
--- with zero references may briefly be revived due to the structure
--- sharing model, and we must arbitrate between revival and GC. GC
--- is incremental to prevent it from holding up durable operations.
+-- The writer handles GC to simplify reasoning about concurrency, in
+-- particular the arbitration between reviving VRef addresses via the
+-- structure sharing feature and deleting VRef addresses with zero
+-- references. GC is incremental to avoid latency spikes with durable
+-- transactions.
 -- 
 module Database.VCache.Write
     ( writeStep
@@ -41,6 +44,7 @@ import Database.VCache.VGetInit -- read dependencies to manage refcts
 import Database.VCache.RWLock -- need a writer lock
 import Database.VCache.Refct  -- to update reference counts
 import Database.VCache.Hash   -- for GC of VRefs
+import Database.VCache.Aligned
 
 -- | when processing write batches, we'll need to track
 -- differences in reference counts for each address.
@@ -56,6 +60,7 @@ type RefctDiff = Map Address Refct
 -- because we have at least a size for the child list.
 type WriteBatch = Map Address WriteCell
 type WriteCell = (ByteString, [PutChild])
+type GCBatch = WriteBatch
 
 -- for updating secondary indices, track names to addresses 
 type UpdSeek = Map ByteString [Address]
@@ -83,7 +88,7 @@ writeStep vc = withRWLock (vcache_rwlock vc) $ do
     let gcLimit = 1000 + 2 * Map.size ub -- adaptive GC rate
     gcb <- runGarbageCollector vc txn gcLimit
 
-    -- update the db_memory. include allocs, writes, deletes.
+    -- update the db_memory. allocs, writes, deletes.
     let fb = Map.union gcb ub -- full batch
     let bUpdGCSep = Map.size fb == (Map.size ub + Map.size gcb) 
     unless bUpdGCSep (fail "VCache bug: overlapping GC and update targets")
@@ -387,32 +392,99 @@ readDataDeps vc addr vData = _vget vgetInit state0 >>= toDeps where
         }
 
 
-
-
-
+-- | Garbage collection in VCache involves selecting addresses with
+-- zero references, filtering objects that are held by VRefs and 
+-- PVars in Haskell memory, then deleting the remainders. 
 --
--- The garbage collection process for VCache is very simple. We 
--- simply scan the zeroes from the database, filter those in the
--- ephemeron tables, and add the rest to our GC target. We'll do
--- this in incremental chunks.
+-- GC is incremental. We limiting the amount of work performed in
+-- each write step to avoid creating too much latency for writers.
+-- To keep up with heavy sustained work loads, GC rate will adapt 
+-- based on the write rates via the gcLimit argument. 
 --
--- We must also limit GC based on the pace the writer is setting.
--- If the number of GC items is above some threshold, we'll need
--- to skip the GC step until the writer has cleared the GC frame.
---
--- The GC value in vcache_memory prevents VRefs from resurrection
--- after selection for GC. This uses the same frame-based reader 
--- lock as the allocator; however, unlike allocations, only the
--- cleanStep thread updates the gc_frm_next field.
-
-runGarbageCollector :: VSpace -> MDB_txn -> Int -> IO WriteBatch
+runGarbageCollector :: VSpace -> MDB_txn -> Int -> IO GCBatch
 runGarbageCollector vc txn gcLimit = do
-    putStrLn "VCache TODO: garbage collection"
-    return Map.empty
+    gcb0 <- gcCandidates vc txn gcLimit
+    gcb <- gcSelectFrame vc gcb0
+    gcClearFrame vc txn gcb
+    return gcb
 
+-- ch
+gcCandidates :: VSpace -> MDB_txn -> Int -> IO GCBatch
+gcCandidates vc txn gcLimit =
+    alloca $ \ pvAddr -> do
+    c0 <- mdb_cursor_open' txn (vcache_db_refct0 vc)
+
+    let loop !n !b !gcb = -- select candidates
+            if (not b) then restartGC vc >> return gcb else
+            (peek pvAddr >>= peekAddr) >>= \ addr ->
+            let gcb' = Map.insert addr gcCell gcb in
+            if (0 == n) then continueGC vc addr >> return gcb' else
+            mdb_cursor_get' MDB_NEXT c0 pvAddr nullPtr >>= \ b' ->
+            loop (n-1) b' gcb'
+
+    let initC0 = -- continue GC or start from beginning of map
+            readIORef (vcache_gc_start vc) >>= \ mbContinue ->
+            case mbContinue of
+                Nothing -> mdb_cursor_get' MDB_FIRST c0 pvAddr nullPtr
+                Just addr -> alloca $ \ pAddr -> do
+                    let vAddr = MDB_val { mv_data = castPtr pAddr
+                                        , mv_size = fromIntegral $ sizeOf addr }
+                    poke pAddr (1 + addr)
+                    poke pvAddr vAddr
+                    mdb_cursor_get' MDB_SET_RANGE c0 pvAddr nullPtr
+
+    b0 <- initC0
+    gcb <- loop gcLimit b0 Map.empty
+    mdb_cursor_close' c0
+    return gcb
+
+-- filter candidates for ephemeral addresses then record the GC frame.
+gcSelectFrame :: VSpace -> GCBatch -> IO GCBatch
+gcSelectFrame vc gcb = 
+    modifyMVarMasked (vcache_memory vc) $ \ m -> do
+    let gcb' = (gcb `Map.difference` mem_vrefs m) `Map.difference` mem_pvars m 
+    let gc' = GC { gc_frm_curr = GCFrame gcb'
+                 , gc_frm_prev = gc_frm_curr (mem_gc m) }
+    let m' = m { mem_gc = gc' }
+    return (m', gcb')
+
+-- delete GC'd addresses from the db_refct0 table.
+gcClearFrame :: VSpace -> MDB_txn -> GCBatch -> IO ()
+gcClearFrame vc txn gcb = 
+    alloca $ \ pAddr -> 
+    alloca $ \ pvAddr -> do
+    let vAddr = MDB_val { mv_data = castPtr pAddr, mv_size = fromIntegral addrSize }
+    poke pvAddr vAddr
+    c0 <- mdb_cursor_open' txn (vcache_db_refct0 vc)
+    
+    let clearAddr addr = do
+            poke pAddr addr
+            bFound <- mdb_cursor_get' MDB_SET c0 pvAddr nullPtr
+            unless bFound (addrBug addr "not found for GC")
+            let flags = compileWriteFlags []
+            mdb_cursor_del' flags c0
+
+    mapM_ clearAddr (Map.keys gcb)
+    mdb_cursor_close' c0
+    return ()
+   
+ 
+-- GC from first address (affects next frame)
+restartGC :: VSpace -> IO ()
+restartGC vc = writeIORef (vcache_gc_start vc) Nothing
+
+-- GC from given address (affects next frame)
+continueGC :: VSpace -> Address -> IO ()
+continueGC vc !addr = writeIORef (vcache_gc_start vc) (Just addr)
 
 gcCell :: WriteCell
 gcCell = (BS.empty, [])    
 
-
+peekAddr :: MDB_val -> IO Address
+peekAddr v =
+    let expectedSize = fromIntegral addrSize in
+    let bBadSize = expectedSize /= mv_size v in
+    if bBadSize then fail "VCache bug: badly formed address" else
+    peekAligned (castPtr (mv_data v))
+{-# INLINABLE peekAddr #-}
 

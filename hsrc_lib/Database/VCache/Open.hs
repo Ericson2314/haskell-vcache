@@ -36,30 +36,27 @@ import Database.VCache.Clean
 
 -- | Open a VCache with a given database file. 
 --
--- In most cases, a Haskell process should only use one instance of VCache
--- for the whole application. This greatly simplifies dataflow between the
--- subprograms. Frameworks, libraries, and plugins that use VCache should
--- receive VCache as an argument, usually a stable subdirectory to provide
--- persistence without namespace collisions. If VCache is opened by a module
--- other than Main, please consider that a design smell.
+-- In most cases, a Haskell process should open VCache in the Main
+-- module then pass it as an argument to the different libraries,
+-- frameworks, plugins, and other software components that require
+-- persistent storage. Use vcacheSubdir to progect against namespace
+-- collisions. 
 --
--- > openVCache nMegaBytes filePath
+-- When opening VCache, developers decide the maximum size and the file
+-- name. For example:
 --
--- Developers must choose the database file name. I'd leave 'cache' out of
--- the name unless you want users to feel free to delete it. An additional
--- lockfile is created with the same file name plus a "-lock" suffix. An
--- exception is raised if the files cannot be created, locked, or opened.
+-- > vc <- openVCache 100 "db"
 --
--- In addition to the file location, developers must choose a maximum 
--- database size in megabytes. This determines how much address space 
--- is memory mapped, and the maximum file size. Depending on your app,
--- you may need to reserve some address space for other resources or
--- databases. Note: Some 64-bit CPUs limit you to 48 bits address, so
--- you might be limited to allocating ~127 terabytes.
+-- This would open a VCache whose file-size limit is 100 megabytes, 
+-- with the name "db", plus an additional "db-lock" lockfile. An 
+-- exception will be raised if these files cannot be created, locked,
+-- or opened. The size limit is passed to LMDB and is separate from
+-- setVRefsCacheSize. 
 --
--- Note: If errors cause the VCache writer threads to halt, VCache will
--- halt the whole program rather than risk database corruption or wasted
--- work. A likely source of error is storing error values in a PVar.
+-- Once opened, VCache typically remains open until process halt. 
+-- If errors are detected, e.g. due to writing an undefined value
+-- to a PVar or running out of space, VCache will attempt to halt
+-- the process.
 --
 openVCache :: Int -> FilePath -> IO VCache
 openVCache nMB fp = do
@@ -134,7 +131,7 @@ openVC' nBytes fl fp = do
         let allocStart = nextAllocAddress allocEnd
         memory <- newMVar (initMemory allocStart)
         tvWrites <- newTVarIO (Writes Map.empty [])
-        mvSignal <- newEmptyMVar
+        mvSignal <- newMVar ()
         cLimit <- newIORef vcDefaultCacheLimit
         cSize <- newIORef 0
         ctWrites <- newIORef $ WriteCt 0 0 0
@@ -142,13 +139,10 @@ openVC' nBytes fl fp = do
         gcCount <- newIORef 0
         rwLock <- newRWLock
 
-        -- Realistically, we're unlikely GC our VCache before the
-        -- process halts. But this should provide some graceful
-        -- shutdown behavior.
-        let closeVC = do
+        -- finalizer, in unlikely event of closure
+        _ <- mkWeakMVar mvSignal $ do
                 mdb_env_close dbEnv
                 FileLock.unlockFile fl
-        _ <- mkWeakMVar mvSignal closeVC
 
         let vc = VCache 
                 { vcache_path = vcRootPath
