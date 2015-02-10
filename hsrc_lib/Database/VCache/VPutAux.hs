@@ -93,7 +93,7 @@ _putVarNat n = _putVarNat q >> putWord8 b where
 -- three bytes for -1M..1M, etc.. Very useful if most numbers are
 -- near 0.
 putVarInt :: Integer -> VPut ()
-putVarInt = _putVarNat . zigZag
+putVarInt = putVarNat . zigZag
 {-# INLINE putVarInt #-}
 
 zigZag :: Integer -> Integer

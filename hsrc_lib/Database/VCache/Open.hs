@@ -101,9 +101,9 @@ vcAllocStart :: Address
 vcAllocStart = 999999999
 
 -- Default cache size is somewhat arbitrary. I've chosen to set it
--- to ten megabytes (as documented in the Cache module). 
+-- to about ten megabytes (as documented in the Cache module). 
 vcDefaultCacheLimit :: Int
-vcDefaultCacheLimit = 10 * 1024 * 1024 
+vcDefaultCacheLimit = 10 * 1000 * 1000 
 
 -- Checking for a `-threaded` runtime
 threaded :: Bool
@@ -200,7 +200,8 @@ initMemory :: Address -> Memory
 initMemory addr = m0 where
     af = AllocFrame Map.empty Map.empty addr
     ac = Allocator addr af af af
-    gc = GC Map.empty Map.empty Map.empty
+    gcf = GCFrame Map.empty
+    gc = GC gcf gcf
     m0 = Memory Map.empty Map.empty gc ac
 
 -- Update write counts.

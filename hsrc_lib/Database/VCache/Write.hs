@@ -6,9 +6,16 @@
 --   Single read/write pass per database per frame
 --   Append newly written content when possible
 --
--- Currently these goals are met, but it does require building a lot
--- of Haskell maps to model the batch processing.
---   
+-- An exception to the single pass is the refct0 database. But this
+-- database should be smaller than the in-RAM ephemeron tables under
+-- normal conditions, assuming GC is working. 
+--
+-- The writer thread also handles the GC algorithm. This simplifies
+-- reasoning about concurrency, in particular the issue where VRefs
+-- with zero references may briefly be revived due to the structure
+-- sharing model, and we must arbitrate between revival and GC. GC
+-- is incremental to prevent it from holding up durable operations.
+-- 
 module Database.VCache.Write
     ( writeStep
     ) where
@@ -64,68 +71,54 @@ writeStep vc = withRWLock (vcache_rwlock vc) $ do
     -- acquire writes, allocations, GC for this step
     ws <- atomically (takeWrites (vcache_writes vc))
     wb <- seralizeWrites (write_data ws)
-    (afrm, gcfrm) <- writerFrameStep vc
+    afrm <- allocFrameStep vc
     let allocInit = alloc_init afrm 
-
-    -- begin LMDB layer transaction
-    txn <- mdb_txn_begin (vcache_db_env vc) Nothing False
-
-    -- update the db_memory. include allocs, writes, deletes.
     let ab = fmap fnWriteAlloc (alloc_list afrm) -- alloc batch
     let ub = Map.union wb ab                     -- update batch (favor writes)
-    let fb = Map.union (fmap (const gcCell) gcfrm) ub  -- full batch
-    let bUpdGCSep = Map.size fb == (Map.size ub + Map.size gcfrm) 
-    unless bUpdGCSep (fail "VCache bug: overlapping GC and updates")
-    (UpdateNotes rcwb hsgcb) <- updateVirtualMemory vc txn allocInit fb
 
-    -- Update reference counts. Include new roots, GC'd values.
-    let rcab = fmap (\ an -> if isNewRoot an then 1 else 0) (alloc_list afrm)
-    let rcub = Map.unionWith (\ a b -> (a + b)) rcwb rcab 
-    let rcfb = Map.union (fmap (const minBound) gcfrm) rcub
-    let bRCGCSep = Map.size rcfb == (Map.size rcub + Map.size gcfrm)
-    unless bRCGCSep (fail "VCache bug: overlapping GC and refct addresses")
-    updateReferenceCounts vc txn allocInit rcfb
+    -- LMDB-layer read-write transaction.
+    txn <- mdb_txn_begin (vcache_db_env vc) Nothing False
+
+    -- select addresses for garbage collection 
+    let gcLimit = 1000 + 2 * Map.size ub -- adaptive GC rate
+    gcb <- runGarbageCollector vc txn gcLimit
+
+    -- update the db_memory. include allocs, writes, deletes.
+    let fb = Map.union gcb ub -- full batch
+    let bUpdGCSep = Map.size fb == (Map.size ub + Map.size gcb) 
+    unless bUpdGCSep (fail "VCache bug: overlapping GC and update targets")
+    (UpdateNotes rcDiff hsDel) <- updateVirtualMemory vc txn allocInit fb
+
+    -- Update reference counts, +1 for new roots.
+    let rcAlloc = fmap (\ an -> if isNewRoot an then 1 else 0) (alloc_list afrm)
+    let rcUpd = Map.unionWith (\ a b -> (a + b)) rcDiff rcAlloc 
+    updateReferenceCounts vc txn allocInit rcUpd
 
     -- Update secondary indices: PVar roots, VRef hashes.
-    let hsab = fmap (fmap alloc_addr) (alloc_seek afrm)
-    let hsfb = Map.unionWith (++) hsgcb hsfb 
-    writeSecondaryIndexes vc txn allocInit hsfb
+    let hsAlloc = fmap (fmap alloc_addr) (alloc_seek afrm)
+    let hsUpd = Map.unionWith (++) hsDel hsAlloc 
+    writeSecondaryIndexes vc txn allocInit hsUpd
 
-    -- Finish writeStep: commit, stats, signaling.
-    mdb_txn_commit txn -- LMDB commit, including synchronization
-    modifyIORef' (vcache_gc_count vc) (+ (Map.size gcfrm)) -- update GC count
-    vcache_signal_writes vc ws       -- report write stats
+    -- Finish writeStep: commit, synch, stats, signals.
+    mdb_txn_commit txn -- LMDB commit & synch
+    modifyIORef' (vcache_gc_count vc) (+ (Map.size gcb)) -- update GC count
+    vcache_signal_writes vc ws -- report write stats
     mapM_ syncSignal (write_sync ws) -- signal waiting threads
 {-# NOINLINE writeStep #-}
 
 -- Interact with GC and Allocation. Only safe once per writeStep.
-writerFrameStep :: VSpace -> IO (AllocFrame, GCFrame)
-writerFrameStep vc = modifyMVarMasked (vcache_memory vc) (return . frameStep)
-
-frameStep :: Memory -> (Memory, (AllocFrame, GCFrame))
-frameStep m = (m', m' `seq` (alloc_frm_curr ac', gc_frm_curr gc')) where
-    m' = m { mem_alloc = ac', mem_gc = gc' }
-    ac = mem_alloc m
-    gc = mem_gc m
-    addr = alloc_new_addr ac
-    ac' = Allocator
-        { alloc_new_addr = addr
-        , alloc_frm_next = newAllocFrame addr
-        , alloc_frm_curr = alloc_frm_next ac
-        , alloc_frm_prev = alloc_frm_curr ac
-        }
-    gc' = GC
-        { gc_frm_next = Map.empty
-        , gc_frm_curr = gc_frm_next gc
-        , gc_frm_prev = gc_frm_curr gc
-        }
-
-newAllocFrame :: Address -> AllocFrame
-newAllocFrame addr = AllocFrame
-    { alloc_init = addr
-    , alloc_seek = Map.empty
-    , alloc_list = Map.empty
-    }
+allocFrameStep :: VSpace -> IO AllocFrame
+allocFrameStep vc = modifyMVarMasked (vcache_memory vc) $ \ m -> do
+    let ac = mem_alloc m
+    let addr = alloc_new_addr ac
+    let ac' = Allocator
+            { alloc_new_addr = addr
+            , alloc_frm_next = AllocFrame Map.empty Map.empty addr
+            , alloc_frm_curr = alloc_frm_next ac
+            , alloc_frm_prev = alloc_frm_curr ac
+            }
+    let m' = m { mem_alloc = ac' }
+    return (m', alloc_frm_curr ac')
 
 isNewRoot :: Allocation -> Bool
 isNewRoot an = isPVarAddr (alloc_addr an) && not (BS.null (alloc_name an))
@@ -150,18 +143,14 @@ fnWriteAlloc an = (alloc_data an, alloc_deps an)
 syncSignal :: MVar () -> IO ()
 syncSignal mv = void (tryPutMVar mv ())
 
-gcCell :: WriteCell
-gcCell = (BS.empty, [])    
-
 -- Write the PVar roots and VRef hashmap. In these cases, the address
 -- is the data, and a bytestring (a path or hash) is the key. I'm using
 -- bytestring-sorted input, in this case, so we can easily insert these
 -- in a sequential order (though they may be widely scattered).
 --
 -- In this case, I haven't encoded whether an entry in the UpdSeek map
--- is a deletion vs. an insertion. But since I know where allocations
--- start, I can infer this information: allocated addresses are inserted,
--- and 
+-- is a deletion vs. an insertion. But, since I know where allocations
+-- start, I can infer this information.
 writeSecondaryIndexes :: VSpace -> MDB_txn -> Address -> UpdSeek -> IO ()
 writeSecondaryIndexes vc txn allocInit updSeek =
     if (Map.null updSeek) then return () else
@@ -178,7 +167,7 @@ writeSecondaryIndexes vc txn allocInit updSeek =
             unless bOK (fail "VCache bug: attempt to overwrite named root")
     let insertHash vKey addr = do
             let flags = compileWriteFlags [MDB_NODUPDATA]
-            bOK <- mdb_cursor_put' insertHash chash vKey vAddr
+            bOK <- mdb_cursor_put' flags chash vKey vAddr
             unless bOK (addrBug addr "VRef hash recorded twice")
     let deleteHash vKey addr =
             alloca $ \ pvKey ->
@@ -306,11 +295,14 @@ addrBug addr msg = fail $ "VCache bug: address " ++ show addr ++ " " ++ msg
 -- 
 data UpdateNotes = UpdateNotes !RefctDiff !UpdSeek
 
+emptyNotes :: UpdateNotes
+emptyNotes = UpdateNotes Map.empty Map.empty
+
 -- Typical CRUD, performed in a sorted-order pass, aggregating notes
 -- useful for further processing.
 updateVirtualMemory :: VSpace -> MDB_txn -> Address -> WriteBatch -> IO UpdateNotes
 updateVirtualMemory vc txn allocStart fb = 
-    if Map.null fb then return Map.empty else  
+    if Map.null fb then return emptyNotes else  
     alloca $ \ pAddr ->
     alloca $ \ pvAddr ->
     alloca $ \ pvOldData -> do
@@ -354,8 +346,7 @@ updateVirtualMemory vc txn allocStart fb =
             if (addr >= allocStart) then create rcs addr bytes else
             update rcs addr bytes
 
-    let udn0 = UpdateNotes Map.empty Map.empty
-    (UpdateNotes rcOld delSeek) <- foldM processCell udn0 (Map.toAscList fb)
+    (UpdateNotes rcOld delSeek) <- foldM processCell emptyNotes (Map.toAscList fb)
     mdb_cursor_close' cmem
 
     assertValidOldDeps allocStart rcOld -- sanity check
@@ -364,17 +355,18 @@ updateVirtualMemory vc txn allocStart fb =
     return (UpdateNotes rcDiff delSeek)
 {-# NOINLINE updateVirtualMemory #-}
 
-
+-- here we might have one bytestring to many addresses... but this is 
+-- extremely unlikely.
 addHash :: ByteString -> Address -> UpdSeek -> UpdSeek
-addHash h addr = Map.alter altr h where
-    altr = Just . (addr:) . maybe [] id 
+addHash h addr = Map.alter f h where
+    f = Just . (addr:) . maybe [] id 
 
 addRefcts :: [Address] -> RefctDiff -> RefctDiff
 addRefcts = flip (L.foldl' altr) where
     altr rc addr = Map.alter (Just . maybe 1 (+ 1)) addr rc 
 
--- paranoid check: we should never have dependencies from
--- old content into the new space.  
+-- sanity check: we should never have dependencies from
+-- old content into the newly allocated space.   
 assertValidOldDeps :: Address -> RefctDiff -> IO ()
 assertValidOldDeps allocStart rcDepsOld = 
     case Map.maxViewWithKey rcDepsOld of
@@ -393,3 +385,34 @@ readDataDeps vc addr vData = _vget vgetInit state0 >>= toDeps where
         , vget_limit = mv_data vData `plusPtr` fromIntegral (mv_size vData)
         , vget_space = vc
         }
+
+
+
+
+
+--
+-- The garbage collection process for VCache is very simple. We 
+-- simply scan the zeroes from the database, filter those in the
+-- ephemeron tables, and add the rest to our GC target. We'll do
+-- this in incremental chunks.
+--
+-- We must also limit GC based on the pace the writer is setting.
+-- If the number of GC items is above some threshold, we'll need
+-- to skip the GC step until the writer has cleared the GC frame.
+--
+-- The GC value in vcache_memory prevents VRefs from resurrection
+-- after selection for GC. This uses the same frame-based reader 
+-- lock as the allocator; however, unlike allocations, only the
+-- cleanStep thread updates the gc_frm_next field.
+
+runGarbageCollector :: VSpace -> MDB_txn -> Int -> IO WriteBatch
+runGarbageCollector vc txn gcLimit = do
+    putStrLn "VCache TODO: garbage collection"
+    return Map.empty
+
+
+gcCell :: WriteCell
+gcCell = (BS.empty, [])    
+
+
+

@@ -12,7 +12,7 @@ module Database.VCache.Types
     , VGet(..), VGetS(..), VGetR(..)
     , VCacheable(..)
     , Allocator(..), AllocFrame(..), Allocation(..)
-    , GC(..), GCFrame
+    , GC(..), GCFrame(..)
     , Memory(..)
     , VTx(..), VTxState(..), TxW(..), VTxBatch(..)
     , Writes(..), WriteLog, WriteCt(..)
@@ -358,29 +358,23 @@ allocFrameSearch f a = f n <|> f c <|> f p where
 -- delete them. So, when we try to allocate a VRef, we'll check to
 -- see if it's address has been targeted for deletion.
 --
--- As with allocation frames, we have three GC frames. This allows
--- a thread separate from the writer to perform GC incrementally,
--- with the writer simply processing GC contents.
---
--- Similar to the allocator, we'll track these in 'frames', relying
--- on the RWLock to limit how many frames a reader falls behind. But
--- there is no need for a 'next' frame because currently only the 
--- writer selects addresses for GC.
+-- To keep this simple, GC is performed by the writer thread. Other
+-- threads must worry about reading outdated reference counts. This
+-- also means we only need the two frames: a reader of frame N-2  
+-- only needs to prevent revival of VRefs GC'd at N-1 or N.
 --
 data GC = GC 
-    { gc_frm_next :: !GCFrame
-    , gc_frm_curr :: !GCFrame
+    { gc_frm_curr :: !GCFrame
     , gc_frm_prev :: !GCFrame
     } 
-type GCFrame = Map Address ()
-    -- The representation of a GC frame is simply a set of addresses.
-    -- Data.Map is favored, rather than Data.Set, for difference and
-    -- intersection operations. 
+data GCFrame = forall a . GCFrame !(Map Address a)
+    -- The concrete map type depends on the writer
 
 recentGC :: GC -> Address -> Bool
-recentGC gc addr = Map.member addr (gc_frm_next gc)
-                || Map.member addr (gc_frm_curr gc)
-                || Map.member addr (gc_frm_prev gc)
+recentGC gc addr = ff c || ff p where
+    ff (GCFrame m) = Map.member addr m
+    c = gc_frm_curr gc
+    p = gc_frm_prev gc
 {-# INLINE recentGC #-}
 
 -- | The Memory datatype tracks allocations, GC, and ephemeron
@@ -412,10 +406,10 @@ withByteStringVal (BSI.PS fp off len) action = withForeignPtr fp $ \ p ->
 {-# INLINE withByteStringVal #-}
 
 -- | The VTx transactions allow developers to atomically manipulate
--- PVars and STM resources (TVars, TArrays, etc..). STM is used to
--- resolve conflicts between transactions, and writes to PVars will
--- be batched and pushed to a background writer thread.
---
+-- PVars and STM resources (TVars, TArrays, etc..). VTx is a thin
+-- layer above STM, additionally tracking which PVars are written so
+-- it can push the batch to a background writer thread upon commit.
+-- 
 -- VTx supports full ACID semantics (atomic, consistent, isolated,
 -- durable), but durability is optional (see markDurable). 
 -- 

@@ -4,6 +4,7 @@ module Database.VCache.PVar
     , newPVar
     , newPVars
     , newPVarIO
+    , newPVarsIO
     , loadRootPVar
     , loadRootPVarIO
     , readPVar
@@ -18,8 +19,10 @@ module Database.VCache.PVar
     ) where
 
 import Control.Concurrent.STM
+
 import Database.VCache.Types
-import Database.VCache.Alloc (newPVar, newPVarIO, loadRootPVar, loadRootPVarIO)
+import Database.VCache.Alloc ( newPVar, newPVars, newPVarIO, newPVarsIO
+                             , loadRootPVar, loadRootPVarIO)
 import Database.VCache.Read (readRefctIO)
 
 -- | Read a PVar as part of a transaction.
