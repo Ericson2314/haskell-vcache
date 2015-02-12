@@ -88,11 +88,16 @@ _addr2vref _dummy vc addr m = do
         Just cache -> return (m, VRef addr cache vc get)
         Nothing -> do
             cache <- newIORef NotCached
-            wkCache <- mkWeakIORef cache (return ())
+            wkCache <- mkWeakIORef cache (onDelVRef addr)
             let e  = VREph addr ty wkCache
             let m' = m { mem_vrefs = addVREph e em }
             m' `seq` return (m', VRef addr cache vc get)
 {-# NOINLINE _addr2vref #-}
+
+-- (used for debugging)
+onDelVRef :: Address -> IO ()
+onDelVRef _addr = return ()
+    -- putStrLn (show _addr ++ " VRef removed from memory")
 
 addVREph :: VREph -> VREphMap -> VREphMap
 addVREph e = Map.alter (Just . maybe i0 ins) (vreph_addr e) where
@@ -143,11 +148,17 @@ _addr2pvar _dummy vc addr m = do
         Nothing -> do
             lzv <- unsafeInterleaveIO $ RDV . fst <$> readAddrIO vc addr get
             var <- newTVarIO lzv
-            wkVar <- mkWeakTVar var (return ())
+            wkVar <- mkWeakTVar var (onDelPVar addr)
             let e = PVEph addr ty wkVar
             let m' = m { mem_pvars = addPVEph e mpv }
             m' `seq` return (m', PVar addr var vc put)
 {-# NOINLINE _addr2pvar #-}
+
+-- (used for debugging)
+onDelPVar :: Address -> IO ()
+onDelPVar _addr = return ()
+    -- putStrLn (show _addr ++ " PVar removed from memory")
+
 
 eTypeMismatch :: Address -> TypeRep -> TypeRep -> String
 eTypeMismatch addr tyNew tyOld = 

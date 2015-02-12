@@ -434,7 +434,7 @@ gcCandidates vc txn gcLimit =
                     mdb_cursor_get' MDB_SET_RANGE c0 pvAddr nullPtr
 
     b0 <- initC0
-    gcb <- loop gcLimit b0 Map.empty
+    gcb <- loop (gcLimit - 1) b0 Map.empty
     mdb_cursor_close' c0
     return gcb
 

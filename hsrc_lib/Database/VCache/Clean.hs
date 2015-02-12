@@ -4,6 +4,25 @@
 -- In addition, this thread will signal the writer when there seems
 -- to be some GC work to perform.  
 --
+-- DESIGN THOUGHTS:
+--
+-- I might be better off removing the ephemeron management into the
+-- weak refs, i.e. using the weak ref finalizers. Also, it seems 
+-- this cleanup process can become a major performance issue when 
+-- run too frequently. 
+--
+-- A possible performance boost is to, instead of firing a bullet
+-- at each cache element, fire a fixed number of bullets based on
+-- the cache size and hit rates. This might require splitting the
+-- mem_vrefs table in two, such that I know which ones are cached
+-- and don't need to worry about shooting into a sparse array.
+-- Use of Map.splitRoot may help here.
+--
+-- Between these two techniques, I might entirely avoid 'sweeping'
+-- the cache structures, and avoid interaction with inactive elements.
+-- This could lead to big CPU savings when I have a large number of
+-- VRefs in memory but they are sparsely populated.
+--
 module Database.VCache.Clean
     ( cleanStep
     ) where
@@ -25,8 +44,8 @@ import Database.VCache.Types
 
 type HitRate = Double
 
--- In each step, this function clears GC'd elements from ephemeron
--- tables and manages cache.
+-- This step clears GC'd elements from ephemeron tables and manages
+-- cache. Currently, this will run about twice per second.
 --
 -- Clearing an ephemeron table requires holding the vcache_memory
 -- MVar. To avoid holding up other users of the MVar, such as VRef
@@ -36,9 +55,7 @@ type HitRate = Double
 -- decay (i.e. kill X% in each pass). This technique requires minimal
 -- information to adapt effectively to varying loads, is unbiased by
 -- the order in which VRefs are processed, and is highly incremental.
--- CacheMode and activity give a value extra opportunities to survive. 
---
--- Steps will run more sedately when everything seems to be in order.
+-- CacheMode and activity give values extra opportunities to survive. 
 -- 
 cleanStep :: VSpace -> IO ()
 cleanStep vc = do
@@ -53,10 +70,9 @@ cleanStep vc = do
             hrAggressiveCleanup -- more than 125% of target load
     !wf <- cleanVRefsCache vc hrCleanup
     writeIORef (vcache_csize vc) wf
-
-    let bSatisfied = max w0 wf < wtgt
+    let bSatisfied = (max w0 wf) < wtgt
     let dtSleep = if bSatisfied then 135000 else 45000
-    usleep dtSleep 
+    usleep (10 * dtSleep) -- slowing it down for now; sweep is too slow
 {-# NOINLINE cleanStep #-}
 
 -- sleep for a number of microseconds
@@ -79,11 +95,12 @@ clearDeadPVars vc = runStepper step where
         testEph pve >>= \ bAlive ->
         return $ if bAlive then Just pve else Nothing
     testEph (PVEph { pveph_data = wk }) = liftM isJust $ deRefWeak wk
-    stepSize = 600
+    stepSize = 800
 {-# NOINLINE clearDeadPVars #-}
 
--- incrementally clear dead VRefs. In this case, we cannot guarantee
--- that our VRefs are 
+-- incrementally clear dead VRefs. In case of a VRef shared by many
+-- types, some increments may be larger than others... but my expectation
+-- is that the amount of sharing is usually small.
 clearDeadVRefs :: VSpace -> IO ()
 clearDeadVRefs vc = runStepper step where
     step k = 
@@ -96,7 +113,7 @@ clearDeadVRefs vc = runStepper step where
         if (L.null xs) then return Nothing else
         return (Just (Map.fromAscList xs))
     testEph (VREph { vreph_cache = wk }) = liftM isJust $ deRefWeak wk
-    stepSize = 400
+    stepSize = 600
 {-# NOINLINE clearDeadVRefs #-}
 
 -- If the writer has some work it could be doing, signal it. This
@@ -195,7 +212,7 @@ maxTickCount bf = (0xf000 .&. bf) == 0xf000
 
 
 -- Compute the per-cycle 'hit rate' based on a target fraction 
--- of deaths for a large number of cycles. 
+-- of kills for a given number of seconds.
 --
 -- hitRate X N: return D such that, with D probability of 
 --  hits per cycle, we'll have X probability of a hit after 
@@ -207,10 +224,13 @@ maxTickCount bf = (0xf000 .&. bf) == 0xf000
 --     log (1-X) = log ((1-D)^N) = N * log(1-D)
 --     D = 1 - exp(log(1-X) % N)
 --
---  After N cycles (N provided) we should have a X probability 
---  of death. Thus, (1-X) = (1-D)^N, or log_N (1-X) = 1-D, or D
-hitRate :: Double -> Double -> HitRate
-hitRate hr n = 1 - exp (log (1 - hr) / n)
+-- We'll adjust the number of cycles for the number of hits per kill,
+-- and compute cycles based on number of seconds.
+killRate :: Double -> Double -> HitRate
+killRate kr s = 1 - exp (log (1 - kr) / n) where
+    n = s * cycles_per_second / hits_per_kill
+    hits_per_kill = 2.0
+    cycles_per_second = 2.22
 
 -- A heuristic cleanup function based on exponential decay and game
 -- logic. In every cycle, we 'hit' some fraction of cache entries,
@@ -249,25 +269,23 @@ hrPassiveCleanup, hrBalancedCleanup, hrAggressiveCleanup :: Double
 
 -- In passive mode, we're at less than 100% load on our cache. We don't
 -- need to clean anything up, but it won't hurt to gradually remove the
--- content if idling. This mode aims for a 1% kill rate per minute, or 
--- a 1% hit rate every 30 seconds.
-hrPassiveCleanup = hitRate 0.01 220
+-- content if idling. This mode aims for a 1% kill rate per minute.
+hrPassiveCleanup = killRate 0.01 60
 
 -- In the default mode, we're between 80% and 125% cache load. In this 
--- case, I want about 1% kill rate per second, i.e. such that we can
--- reduce from a 115% load to 100% load in ~fifteen seconds. We run a
--- bit faster above 100% load; we need a 1% hit rate per 11 cycles.
-hrBalancedCleanup = hitRate 0.01 11
+-- case, I want about 3% kill rate per second, i.e. such that we can
+-- reduce from a 115% load to 100% load in ~five seconds. 
+hrBalancedCleanup = killRate 0.03 1
 
 -- In aggressive mode, we've moved up above 125% cache load. At this
 -- point, we need to be relatively aggressive in removing content, e.g.
--- killing 5% per second until we're into more reasonable territory.
+-- killing 9% per second until we're into more reasonable territory.
 --
 -- If our cache is much larger than this, I'd assume it's a sudden
 -- burst of activity or that our cache isn't large enough. But we can
 -- take advantage of the natural scaling factor for exponential decay,
 -- i.e. at 200% load we'll release about 10% per second.
-hrAggressiveCleanup = hitRate 0.05 11
+hrAggressiveCleanup = killRate 0.09 1
 
 -- incrementally update a map, processing at most nKeys at a time then
 -- return the last key processed.
