@@ -136,15 +136,18 @@ data Cache a
 
 
 -- | Cache modes are used when deciding, heuristically, whether to
--- clear a value from cache. The modes don't have precise meaning,
+-- clear a value from cache. These modes don't have precise meaning,
 -- but there is a general intention: higher numbered modes indicate
 -- that VCache should hold onto a value for longer or with greater
--- priority.
+-- priority. In the current implementation, CacheMode is used as a
+-- pool of 'hitpoints' in a gaming metaphor: if an entry would be
+-- removed, but its mode is greater than zero, the mode is reduced
+-- instead.
 --
 -- The default for vref and deref is CacheMode1. Use of vrefc or 
--- derefc may indicate other modes. Cache mode is monotonic; if
+-- derefc may specify other modes. Cache mode is monotonic: if
 -- the same VRef is deref'd with two different modes, the higher
--- mode will be preserved.
+-- mode will be favored.
 --
 -- Note: Regardless of mode, a VRef that is fully GC'd from the
 -- Haskell layer will ensure any cached content is also GC'd.

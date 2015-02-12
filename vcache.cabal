@@ -61,6 +61,7 @@ Library
     , lmdb (>= 0.2.5)
     , filelock
     , easy-file
+    , random (>= 1.0)
 
   Exposed-Modules:
     Database.VCache

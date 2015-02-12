@@ -65,10 +65,8 @@ import Database.VCache.Hash
 import Database.VCache.Read
 
 -- | Obtain a VRef given an address and value. Not initially cached.
---
--- This operation will return Nothing if the requested address has
--- been selected for garbage collection. Note that this operation 
--- does not touch the LMDB-layer database.
+-- This operation doesn't touch the persistence layer; it assumes the
+-- given address is valid.
 addr2vref :: (VCacheable a) => VSpace -> Address -> IO (VRef a)
 addr2vref vc addr = 
     assert (isVRefAddr addr) $ 
@@ -76,7 +74,6 @@ addr2vref vc addr =
     addr2vref' vc addr
 {-# INLINE addr2vref #-}
 
--- this function assumes that address is valid (previously allocated and not GC'd)
 addr2vref' :: (VCacheable a) => VSpace -> Address -> Memory -> IO (Memory, VRef a)
 addr2vref' vc addr m = _addr2vref undefined vc addr m
 {-# INLINE addr2vref' #-}
@@ -120,7 +117,7 @@ mbrun = maybe (pure Nothing)
 
 -- | Obtain a PVar given an address. PVar will lazily load when read.
 -- This operation does not try to read the database. It may fail if
--- the given address is already loaded with another object.
+-- the requested address has already been loaded with another type.
 addr2pvar :: (VCacheable a) => VSpace -> Address -> IO (PVar a)
 addr2pvar vc addr = 
     assert (isPVarAddr addr) $ 
