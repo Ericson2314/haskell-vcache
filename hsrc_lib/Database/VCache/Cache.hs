@@ -4,6 +4,7 @@
 module Database.VCache.Cache
     ( setVRefsCacheSize
     , clearVRefsCache
+    , clearVRefCache
     ) where
 
 import Control.Applicative ((<$>))
