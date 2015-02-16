@@ -1,12 +1,13 @@
 {-# LANGUAGE DeriveDataTypeable, ExistentialQuantification, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE BangPatterns #-}
 
 -- Internal file. Lots of types. Lots of coupling.
 module Database.VCache.Types
     ( Address, isVRefAddr, isPVarAddr
     , VRef(..), Cache(..), CacheMode(..)
-    , VREph(..), VREphMap 
+    , VREph(..), VREphMap, addVREph, takeVREph
     , PVar(..), RDV(..)
-    , PVEph(..), PVEphMap
+    , PVEph(..), PVEphMap, addPVEph
     , VCache(..), VSpace(..)
     , VPut(..), VPutS(..), VPutR(..), PutChild(..), putChildAddr
     , VGet(..), VGetS(..), VGetR(..)
@@ -16,6 +17,7 @@ module Database.VCache.Types
     , Memory(..)
     , VTx(..), VTxState(..), TxW(..), VTxBatch(..)
     , Writes(..), WriteLog, WriteCt(..)
+    , CacheSizeEst(..)
 
     -- misc. utilities
     , allocFrameSearch
@@ -98,10 +100,13 @@ data VRef a = VRef
     { vref_addr   :: {-# UNPACK #-} !Address            -- ^ address within the cache
     , vref_cache  :: {-# UNPACK #-} !(IORef (Cache a))  -- ^ cached value & weak refs 
     , vref_space  :: !VSpace                            -- ^ virtual address space for VRef
+    , vref_type   :: !TypeRep                           -- ^ type of value held by VRef
     , vref_parse  :: !(VGet a)                          -- ^ parser for this VRef
     } deriving (Typeable)
 instance Eq (VRef a) where (==) = (==) `on` vref_cache
-instance Show (VRef a) where showsPrec _ v = showString "VRef#" . shows (vref_addr v)
+instance Show (VRef a) where 
+    showsPrec _ v = showString "VRef#" . shows (vref_addr v)
+                  . showString "::" . shows (vref_type v)
 
 -- For every VRef we have in memory, we need an ephemeron in a table.
 -- This ephemeron table supports structure sharing, caching, and GC.
@@ -113,6 +118,29 @@ data VREph = forall a . VREph
     } 
 type VREphMap = Map Address (Map TypeRep VREph)
     -- Address is at the top layer of the map mostly to simplify GC.
+
+
+addVREph :: VREph -> VREphMap -> VREphMap
+addVREph e = Map.alter (Just . maybe i0 ins) (vreph_addr e) where
+    ty = vreph_type e
+    i0 = Map.singleton ty e
+    ins = Map.insert ty e
+{-# INLINABLE addVREph #-}
+                    
+takeVREph :: Address -> TypeRep -> VREphMap -> Maybe (VREph, VREphMap)
+takeVREph !addr !ty !em = 
+    case Map.lookup addr em of
+         Nothing -> Nothing
+         Just tym -> case Map.lookup ty tym of
+            Nothing -> Nothing
+            Just e -> 
+                let em' = if (1 == Map.size tym)
+                        then Map.delete addr em 
+                        else Map.insert addr (Map.delete ty tym) em
+                in
+                Just (e, em') 
+{-# INLINABLE takeVREph #-}
+
 
 -- TODO: I may need a way to "reserve" VRef addresses for destruction, 
 -- i.e. such that I can guard against 
@@ -128,10 +156,14 @@ data Cache a
 -- cache bitfield for mode:
 --   bit 0..4: heuristic weight, log scale
 --     weight = bytes + 80 * (deps + 1)
---     log scale: 2^(N+7), max N=31
---   bits 5..6: heuristic priority 
---   bit 7: touch; marked 0 on deref
---   bits 8..15: for use by cache manager
+--     log scale: 2^(N+6), max N=31
+--   bits 5..6: cache mode 0..3
+--   bit 7: toggle; set 1 by manager, 0 by derefc
+--
+-- The weight is used for estimates of cache size, and at the moment
+-- cache mode is the primary factor in deciding survival of an object
+-- after the cache manager touches it. Higher bits might be used to 
+-- estimate use and extend survival, but for now don't do anything.
 --
 
 
@@ -166,23 +198,21 @@ cacheModeBits CacheMode2 = 2 `shiftL` 5
 cacheModeBits CacheMode3 = 3 `shiftL` 5
 
 
--- | clear bit 7, and adjust cache mode monotonically.
+-- | clear bit 7; adjust cache mode monotonically.
 touchCache :: CacheMode -> Word16 -> Word16
-touchCache cm w =
+touchCache !cm !w =
     let cb' = (w .&. 0x60) `max` cacheModeBits cm in
     (w .&. 0xff1f) .|. cb'
 {-# INLINE touchCache #-}
 
--- | mkVRefCache val weight
 mkVRefCache :: a -> Int -> CacheMode -> Cache a
-mkVRefCache val w cm = Cached val cw where
-    cw = m .|. cs 0 128
+mkVRefCache val !w !cm = Cached val cw where
+    cw = m .|. cs 0 64
     cs r k = if ((k > w) || (r == 0x1f)) then r else cs (r+1) (k*2)
     m = cacheModeBits cm
 
--- | cacheWeight nBytes nDeps
 cacheWeight :: Int -> Int -> Int
-cacheWeight nBytes nDeps = nBytes + (80 * nDeps)
+cacheWeight !nBytes !nDeps = nBytes + (80 * nDeps)
 {-# INLINE cacheWeight #-}
 
 -- | A PVar is a mutable variable backed by VCache. PVars can be read
@@ -211,10 +241,13 @@ data PVar a = PVar
     { pvar_addr  :: {-# UNPACK #-} !Address
     , pvar_data  :: {-# UNPACK #-} !(TVar (RDV a))
     , pvar_space :: !VSpace -- ^ virtual address space for PVar
+    , pvar_type  :: !TypeRep
     , pvar_write :: !(a -> VPut ())
     } deriving (Typeable)
 instance Eq (PVar a) where (==) = (==) `on` pvar_data
-instance Show (PVar a) where showsPrec _ pv = showString "PVar#" . shows (pvar_addr pv)
+instance Show (PVar a) where 
+    showsPrec _ pv = showString "PVar#" . shows (pvar_addr pv)
+                   . showString "::" . shows (pvar_type pv)
 
 -- ephemeron table for PVars.
 data PVEph = forall a . PVEph 
@@ -223,6 +256,10 @@ data PVEph = forall a . PVEph
     , pveph_data :: {-# UNPACK #-} !(Weak (TVar (RDV a)))
     }
 type PVEphMap = Map Address PVEph
+
+addPVEph :: PVEph -> PVEphMap -> PVEphMap
+addPVEph pve = Map.insert (pveph_addr pve) pve
+{-# INLINE addPVEph #-}
 
 -- I need some way to force an evaluation when a PVar is first
 -- read, i.e. in order to load the initial value, without forcing
@@ -279,8 +316,6 @@ data VSpace = VSpace
     , vcache_writes     :: !(TVar Writes) -- STM layer PVar writes
     , vcache_rwlock     :: !RWLock -- replace gap left by MDB_NOLOCK
 
-    , vcache_climit     :: !(IORef Int) -- target cache size in bytes
-    , vcache_csize      :: !(IORef Int) -- current cache size (for stats)
 
     -- Signal writes mostly exists to prevent GC of PVars until after 
     -- any updated PVars are durable. I also use it to maintain stats. :)
@@ -292,9 +327,9 @@ data VSpace = VSpace
     , vcache_gc_start   :: !(IORef (Maybe Address)) -- supports incremental GC
     , vcache_gc_count   :: !(IORef Int) -- (stat) number of addresses GC'd
 
-    -- Still needed:
-    --  data for GC guidance
-    --  data for cache guidance
+    , vcache_climit     :: !(IORef Int) -- targeted max cache size in bytes
+    , vcache_csize      :: !(IORef CacheSizeEst) -- estimated cache sizes
+
 
     -- share persistent variables for safe STM
 
@@ -386,10 +421,11 @@ recentGC gc addr = ff c || ff p where
 -- operations on them are atomic... and STM isn't permitted 
 -- because vref constructors are used with unsafePerformIO.
 data Memory = Memory
-    { mem_vrefs :: !VREphMap
-    , mem_pvars :: !PVEphMap
-    , mem_gc    :: !GC
-    , mem_alloc :: !Allocator
+    { mem_evrefs :: !VREphMap   -- ^ VRefs with empty cache.
+    , mem_cvrefs :: !VREphMap   -- ^ VRefs with full cache.
+    , mem_pvars  :: !PVEphMap   -- ^ In-memory PVars
+    , mem_gc     :: !GC         -- ^ recently GC'd addresses (two frames)
+    , mem_alloc  :: !Allocator  -- ^ recent or pending allocations (three frames)
     }
 
 
@@ -450,8 +486,14 @@ markForWrite pv a = VTx $ modify $ \ vtx ->
 {-# INLINE markForWrite #-}
 
 
-
-
+-- | Estimate for cache size is based on random samples with an
+-- exponential moving average. It isn't very precise, but it is
+-- good enough for the purpose of guiding aggressiveness of the
+-- exponential decay model.
+data CacheSizeEst = CacheSizeEst
+    { csze_addr_size  :: {-# UNPACK #-} !Double -- average of sizes
+    , csze_addr_sqsz  :: {-# UNPACK #-} !Double -- average of squares
+    }
 
 
 
@@ -618,5 +660,4 @@ class (Typeable a) => VCacheable a where
 
     -- | Parse a value from its serialized representation into memory.
     get :: VGet a
-
 

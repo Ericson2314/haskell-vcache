@@ -102,6 +102,14 @@ vcAllocStart = 999999999
 vcDefaultCacheLimit :: Int
 vcDefaultCacheLimit = 10 * 1000 * 1000 
 
+-- initial cache size
+vcInitCacheSizeEst :: CacheSizeEst
+vcInitCacheSizeEst = CacheSizeEst
+    { csze_addr_size = sz -- err likely on high side to start
+    , csze_addr_sqsz = (sz * sz)
+    }
+    where sz = 2048 -- err likely on high side to start
+
 -- Checking for a `-threaded` runtime
 threaded :: Bool
 threaded = rtsSupportsBoundThreads
@@ -133,7 +141,7 @@ openVC' nBytes fl fp = do
         tvWrites <- newTVarIO (Writes Map.empty [])
         mvSignal <- newMVar ()
         cLimit <- newIORef vcDefaultCacheLimit
-        cSize <- newIORef 0
+        cSize <- newIORef vcInitCacheSizeEst
         ctWrites <- newIORef $ WriteCt 0 0 0
         gcStart <- newIORef Nothing
         gcCount <- newIORef 0
@@ -196,7 +204,7 @@ initMemory addr = m0 where
     ac = Allocator addr af af af
     gcf = GCFrame Map.empty
     gc = GC gcf gcf
-    m0 = Memory Map.empty Map.empty gc ac
+    m0 = Memory Map.empty Map.empty Map.empty gc ac
 
 -- Update write counts.
 updWriteCt :: IORef WriteCt -> Writes -> IO ()
@@ -206,13 +214,13 @@ updWriteCt var w = modifyIORef' var $ \ wct ->
     let synCt = wct_sync wct + L.length (write_sync w) in
     WriteCt { wct_frames = frmCt, wct_pvars = pvCt, wct_sync = synCt }
 
-
 -- | Create background threads needed by VCache.
 initVCacheThreads :: VSpace -> IO ()
 initVCacheThreads vc = begin where
     begin = do
         task (writeStep vc)
         task (cleanStep vc)
+        return ()
     task step = void (forkIO (forever step `catch` onE))
     onE :: SomeException -> IO ()
     onE e | isBlockedOnMVar e = return () -- full GC of VCache

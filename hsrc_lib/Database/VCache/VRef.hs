@@ -55,22 +55,23 @@ deref = derefc CacheMode1
 
 -- | Dereference a VRef with an alternative cache control mode.
 derefc :: CacheMode -> VRef a -> a
-derefc cm v = unsafeDupablePerformIO $
+derefc cm v = unsafeDupablePerformIO $ 
     unsafeInterleaveIO (readVRef v) >>= \ lazy_read_rw ->
-    atomicModifyIORef (vref_cache v) $ \ c -> case c of
-        Cached r w -> 
-            let w' = touchCache cm w in
-            let c' = Cached r w' in 
-            c' `seq` (c',r)
+    join $ atomicModifyIORef (vref_cache v) $ \ c -> case c of
+        Cached r bf ->
+            let bf' = touchCache cm bf in
+            let c' = Cached r bf' in
+            (c', c' `seq` return r)
         NotCached ->
             let (r,w) = lazy_read_rw in
             let c' = mkVRefCache r w cm in
-            c' `seq` (c',r)
+            let op = initVRefCache v >> return r in
+            (c', c' `seq` op)
 {-# NOINLINE derefc #-}
 
--- For the moment, I'm just using CacheMode1. I reserved space for
--- cache modes, but I'm uncertain how I should expose them to users
--- and what they should do exactly, other than maybe tweak timeouts.
+
+-- I've modified how VRefs are recorded 
+
 
 -- | Dereference a VRef. This will read from the cache if the value
 -- is available, but will not update the cache. If the value is not

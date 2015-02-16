@@ -407,8 +407,9 @@ runGarbageCollector vc txn gcLimit = do
     gcb <- gcSelectFrame vc gcb0
     gcClearFrame vc txn gcb
     return gcb
+{-# NOINLINE runGarbageCollector #-}
 
--- ch
+
 gcCandidates :: VSpace -> MDB_txn -> Int -> IO GCBatch
 gcCandidates vc txn gcLimit =
     alloca $ \ pvAddr -> do
@@ -442,13 +443,16 @@ gcCandidates vc txn gcLimit =
 gcSelectFrame :: VSpace -> GCBatch -> IO GCBatch
 gcSelectFrame vc gcb = 
     modifyMVarMasked (vcache_memory vc) $ \ m -> do
-    let gcb' = (gcb `Map.difference` mem_vrefs m) `Map.difference` mem_pvars m 
+    let gcb' = (((gcb `Map.difference` mem_evrefs m) 
+                      `Map.difference` mem_cvrefs m) 
+                      `Map.difference` mem_pvars  m) 
     let gc' = GC { gc_frm_curr = GCFrame gcb'
                  , gc_frm_prev = gc_frm_curr (mem_gc m) }
     let m' = m { mem_gc = gc' }
     return (m', gcb')
 
--- delete GC'd addresses from the db_refct0 table.
+-- delete GC'd addresses from the db_refct0 table. Returns 
+-- number of addresses in 
 gcClearFrame :: VSpace -> MDB_txn -> GCBatch -> IO ()
 gcClearFrame vc txn gcb = 
     alloca $ \ pAddr -> 
