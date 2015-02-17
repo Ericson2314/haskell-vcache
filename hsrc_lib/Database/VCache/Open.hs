@@ -142,6 +142,7 @@ openVC' nBytes fl fp = do
         mvSignal <- newMVar ()
         cLimit <- newIORef vcDefaultCacheLimit
         cSize <- newIORef vcInitCacheSizeEst
+        cVRefs <- newMVar Map.empty
         ctWrites <- newIORef $ WriteCt 0 0 0
         gcStart <- newIORef Nothing
         gcCount <- newIORef 0
@@ -168,6 +169,7 @@ openVC' nBytes fl fp = do
                     , vcache_rwlock = rwLock
                     , vcache_climit = cLimit
                     , vcache_csize = cSize
+                    , vcache_cvrefs = cVRefs
                     , vcache_signal_writes = updWriteCt ctWrites
                     , vcache_ct_writes = ctWrites
                     , vcache_alloc_init = allocStart
@@ -204,7 +206,7 @@ initMemory addr = m0 where
     ac = Allocator addr af af af
     gcf = GCFrame Map.empty
     gc = GC gcf gcf
-    m0 = Memory Map.empty Map.empty Map.empty gc ac
+    m0 = Memory Map.empty Map.empty gc ac
 
 -- Update write counts.
 updWriteCt :: IORef WriteCt -> Writes -> IO ()

@@ -41,13 +41,8 @@ setVRefsCacheLimit vc !n = writeIORef (vcache_climit vc) n
 -- find some use for benchmarks or staged applications.
 clearVRefsCache :: VSpace -> IO ()
 clearVRefsCache vc = do 
-    -- we must hold lock for long enough to move contents to mem_evrefs
-    ephMap <- modifyMVarMasked (vcache_memory vc) $ \ m -> do
-        let evrefs' = Map.unionWith (Map.union) (mem_cvrefs m) (mem_evrefs m) 
-        let m' = m { mem_cvrefs = Map.empty, mem_evrefs = evrefs' }
-        m' `seq` return (m', mem_cvrefs m)
-    mapM_ (mapM_ clearVREphCache . Map.elems) (Map.elems ephMap)
-{-# NOINLINE clearVRefsCache #-}
+    cvrefs <- swapMVar (vcache_cvrefs vc) Map.empty
+    mapM_ (mapM_ clearVREphCache . Map.elems) (Map.elems cvrefs)
 
 clearVREphCache :: VREph -> IO ()
 clearVREphCache (VREph { vreph_cache = wc }) =   
@@ -55,7 +50,6 @@ clearVREphCache (VREph { vreph_cache = wc }) =
     case mbCache of
         Nothing -> return ()
         Just cache -> writeIORef cache NotCached
-
 
 -- | Immediately clear the cache associated with a VRef, allowing 
 -- any contained data to be GC'd. Normally, VRef cached values are
@@ -65,13 +59,10 @@ clearVREphCache (VREph { vreph_cache = wc }) =
 clearVRefCache :: VRef a -> IO ()
 clearVRefCache v = do
     let vc = vref_space v 
-    modifyMVarMasked_ (vcache_memory vc) $ \ m -> do
-        case takeVREph (vref_addr v) (vref_type v) (mem_cvrefs m) of
-            Nothing -> return m -- was not cached
-            Just (e, cvrefs') -> do
-                let evrefs' = addVREph e (mem_evrefs m)
-                let m' = m { mem_cvrefs = cvrefs', mem_evrefs = evrefs' }
-                return $! m'
+    modifyMVarMasked_ (vcache_cvrefs vc) $ \ cvrefs -> do
+        case takeVREph (vref_addr v) (vref_type v) cvrefs of
+            Nothing -> return cvrefs -- was not cached
+            Just ( _ , cvrefs') -> return cvrefs'
     writeIORef (vref_cache v) NotCached
 {-# NOINLINE clearVRefCache #-}
 

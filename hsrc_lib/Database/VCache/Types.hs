@@ -329,6 +329,7 @@ data VSpace = VSpace
 
     , vcache_climit     :: !(IORef Int) -- targeted max cache size in bytes
     , vcache_csize      :: !(IORef CacheSizeEst) -- estimated cache sizes
+    , vcache_cvrefs     :: !(MVar VREphMap) -- track just the cached VRefs
 
 
     -- share persistent variables for safe STM
@@ -421,13 +422,11 @@ recentGC gc addr = ff c || ff p where
 -- operations on them are atomic... and STM isn't permitted 
 -- because vref constructors are used with unsafePerformIO.
 data Memory = Memory
-    { mem_evrefs :: !VREphMap   -- ^ VRefs with empty cache.
-    , mem_cvrefs :: !VREphMap   -- ^ VRefs with full cache.
+    { mem_vrefs  :: !VREphMap   -- ^ In-memory VRefs
     , mem_pvars  :: !PVEphMap   -- ^ In-memory PVars
     , mem_gc     :: !GC         -- ^ recently GC'd addresses (two frames)
     , mem_alloc  :: !Allocator  -- ^ recent or pending allocations (three frames)
     }
-
 
 
 -- simple read-only operations 

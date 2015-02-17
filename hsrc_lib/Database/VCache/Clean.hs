@@ -36,6 +36,7 @@ import Control.Concurrent
 import Data.Bits
 import qualified Data.Traversable as TR
 import qualified Data.Map.Strict as Map
+import qualified Data.List as L
 import Data.IORef
 import qualified System.Mem.Weak as Weak
 import qualified System.Random as Random
@@ -46,9 +47,6 @@ import Database.VCache.Types
 -- | Cache cleanup, and signal writer for old content.
 cleanStep :: VSpace -> IO ()
 cleanStep vc = do
-    bsig <- shouldSignalWriter vc
-    when bsig (signalWriter vc)
-
     wtgt <- readIORef (vcache_climit vc)
     w0 <- estCacheSize vc
     let hitRate = 
@@ -60,11 +58,14 @@ cleanStep vc = do
             if ((100 * w0) < (240 * wtgt)) then 0.05 else
             0.06
     xcln vc hitRate
-    updateCacheSizeEst vc
+    updateCacheSizeEst vc 10 0.01
     wf <- estCacheSize vc
 
+    bsig <- shouldSignalWriter vc
+    when bsig (signalWriter vc)
+
     let bSatisfied = (max w0 wf) < wtgt
-    let dtSleep = if bSatisfied then 295000 else 95000 
+    let dtSleep = if bSatisfied then 270000 else 135000 
     usleep dtSleep -- ~10Hz, slower when steady
 
 -- sleep for a number of microseconds
@@ -86,46 +87,33 @@ estCacheSize vc = do
 
 readCacheAddrCt :: VSpace -> IO Int
 readCacheAddrCt vc = do
-    m <- readMVar (vcache_memory vc)
-    return $! Map.size (mem_cvrefs m)
+    cvrefs <- readMVar (vcache_cvrefs vc)
+    return $! Map.size cvrefs
 
--- sample the cache at a few random addresses, use this to update the
--- cache size by a small factor. Over the course of many seconds, the
--- estimated average size per address should approach the actual size
--- assuming the average itself is stable. Even if average size isn't
--- stable, this is good enough to help guide the cache manager.
---
--- The assumption here is that the cvrefs map is usually large. If it
--- is small, we'll still use the same algorithm, even if it's a bit 
--- redundant, to simplify reasoning and testing. A constant number of
--- samples are taken in each round. Probabilistically
-updateCacheSizeEst :: VSpace -> IO ()
-updateCacheSizeEst vc =
-    readMVar (vcache_memory vc) >>= \ m ->
-    let cvrefs = mem_cvrefs m in
+-- sample the cache at random addresses, and update using an
+-- exponential running average.
+updateCacheSizeEst :: VSpace -> Int -> Double -> IO ()
+updateCacheSizeEst vc !n !alpha =
+    readMVar (vcache_cvrefs vc) >>= \ cvrefs ->
     if Map.null cvrefs then return () else
-    let nextIx = Random.randomR (0, Map.size cvrefs - 1) in
-    let loop !n !r !sz !sqsz = 
-            if (0 == n) then return (sz,sqsz) else
-            let (ix,r') = nextIx r in
-            let (_, tym) = Map.elemAt ix cvrefs in
-            let (_, e) = Map.findMin tym in -- safe; address elements non-empty
+    Random.newStdGen >>= \ rgen ->
+    let ixs = L.take n $ Random.randomRs (0, Map.size cvrefs - 1) rgen in
+    let readAddrSize ix = 
+            let (_addr, tym) = Map.elemAt ix cvrefs in
+            let (_ty, e) = Map.findMin tym in
             readVREphSize e >>= \ esz ->
-            let addrsz = fromIntegral $ esz * Map.size tym in
-            let sz' = sz + addrsz in
-            let sqsz' = sqsz + (addrsz * addrsz) in
-            loop (n-1) r' sz' sqsz'
+            return (esz * fromIntegral (Map.size tym))
     in
-    let nSamples = 15 :: Int in
-    Random.newStdGen >>= \ r ->
-    loop nSamples r 0 0 >>= \ (totalSize, totalSqSize) ->
-    let sampleAvg = totalSize / fromIntegral nSamples in
-    let sampleAvgSq = totalSqSize / fromIntegral nSamples in
-    readIORef (vcache_csize vc) >>= \ (CacheSizeEst oldAvg oldAvgSq) ->
-    let alpha = 0.015 :: Double in
-    let newAvg = alpha * sampleAvg + ((1.0 - alpha) * oldAvg) in
-    let newAvgSq = alpha * sampleAvgSq + ((1.0 - alpha) * oldAvgSq) in
-    writeIORef (vcache_csize vc) $! (CacheSizeEst newAvg newAvgSq)
+    mapM readAddrSize ixs >>= \ lSizes ->
+    let szTotal = L.foldl' (+) 0 lSizes in
+    let sqszTotal = L.foldl' (\ ssq x -> ssq + (x*x)) 0 lSizes in
+    let szAvgSamp = fromIntegral (szTotal `div` n) in
+    let sqszAvgSamp = fromIntegral (sqszTotal `div` n) in
+    readIORef (vcache_csize vc) >>= \ (CacheSizeEst szAvgEst sqszAvgEst) ->
+    let upd new old = (alpha * new) + ((1.0 - alpha) * old) in
+    let szAvg' = upd szAvgSamp szAvgEst in
+    let sqszAvg' = upd sqszAvgSamp sqszAvgEst in
+    writeIORef (vcache_csize vc) $! (CacheSizeEst szAvg' sqszAvg')
 
 readVREphSize :: VREph -> IO Int
 readVREphSize (VREph { vreph_cache = wk }) =
@@ -133,7 +121,7 @@ readVREphSize (VREph { vreph_cache = wk }) =
         Nothing -> return 2048 -- GC'd recently; high estimate
         Just cache -> readIORef cache >>= \ c -> case c of
             NotCached -> 
-                let eMsg = "VCache bug: NotCached element found in mem_cvrefs" in
+                let eMsg = "VCache bug: NotCached element found in vcache_cvrefs" in
                 fail eMsg
             Cached _ bf ->
                 let lgSz = 6 + fromIntegral (0x1f .&. bf) in
@@ -158,33 +146,27 @@ xclnLoop !vc !n !r =
     xclnStrike vc r >>= xclnLoop vc (n-1)
 
 xclnStrike :: VSpace -> Random.StdGen -> IO Random.StdGen
-xclnStrike !vc !r = modifyMVarMasked (vcache_memory vc) $ \ m ->
-    if Map.null (mem_cvrefs m) then return (m,r) else do
-    let cvrefs = mem_cvrefs m
-    let evrefs = mem_evrefs m
+xclnStrike !vc !r = modifyMVarMasked (vcache_cvrefs vc) $ \ cvrefs ->
+    if Map.null cvrefs then return (cvrefs, r) else do
     let (ix,r') = Random.randomR (0, Map.size cvrefs - 1) r
     let (addr, tym) = Map.elemAt ix cvrefs 
-    (tymc, tyme) <- Map.mapEither id <$> TR.traverse strikeVREph tym
-    let cvrefs' = if Map.null tymc then Map.delete addr cvrefs else
-                  if Map.null tyme then cvrefs else
-                  Map.insert addr tymc cvrefs
-    let evrefs' = if Map.null tyme then evrefs else
-                  Map.insertWith (Map.union) addr tyme evrefs
-    let m' = m { mem_cvrefs = cvrefs', mem_evrefs = evrefs' }
-    return (m', m' `seq` r')
+    tym' <- Map.mapMaybe id <$> TR.traverse strikeVREph tym
+    let cvrefs' = if Map.null tym' then Map.delete addr cvrefs 
+                                   else Map.insert addr tym' cvrefs
+    return (cvrefs', r')
 
 -- strikeVREph will reduce the CacheMode for a cached element or
--- remove it from the cache (in right) for CacheMode0.
-strikeVREph :: VREph -> IO (Either VREph VREph)
+-- remove it from the cache for CacheMode0.
+strikeVREph :: VREph -> IO (Maybe VREph)
 strikeVREph vreph@(VREph { vreph_cache = wk }) =
     Weak.deRefWeak wk >>= \ mbCache -> case mbCache of
-        Nothing -> return (Right vreph) -- 
+        Nothing -> return Nothing 
         Just cache -> atomicModifyIORef cache $ \ c -> case c of
             Cached r bf | (0 /= bf .&. 0x60) -> 
                 let bf' = (0x80 .|. (bf - 0x20)) in
                 let c' = Cached r bf' in
-                (c', c' `seq` (Left vreph))
-            _ -> (NotCached, Right vreph)
+                (c', c' `seq` (Just vreph))
+            _ -> (NotCached, Nothing)
 
 -- If the writer has obvious work it could be doing, signal it. This
 -- won't significantly affect a busy writer, but an idle writer may
@@ -196,7 +178,7 @@ shouldSignalWriter vc =
     let bHoldingAllocs = not (emptyAllocation (mem_alloc m)) in
     if bHoldingAllocs then return True else
     readZeroesCt vc >>= \ ctZeroes ->
-    let ctEphAddrs = Map.size (mem_cvrefs m) + Map.size (mem_evrefs m) + Map.size (mem_pvars m) in
+    let ctEphAddrs = Map.size (mem_vrefs m) + Map.size (mem_pvars m) in
     if (ctEphAddrs < ctZeroes) then return True else
     return False
 

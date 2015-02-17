@@ -443,9 +443,8 @@ gcCandidates vc txn gcLimit =
 gcSelectFrame :: VSpace -> GCBatch -> IO GCBatch
 gcSelectFrame vc gcb = 
     modifyMVarMasked (vcache_memory vc) $ \ m -> do
-    let gcb' = (((gcb `Map.difference` mem_evrefs m) 
-                      `Map.difference` mem_cvrefs m) 
-                      `Map.difference` mem_pvars  m) 
+    let gcb' = ((gcb `Map.difference` mem_vrefs m) 
+                     `Map.difference` mem_pvars m) 
     let gc' = GC { gc_frm_curr = GCFrame gcb'
                  , gc_frm_prev = gc_frm_curr (mem_gc m) }
     let m' = m { mem_gc = gc' }

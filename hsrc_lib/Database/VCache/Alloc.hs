@@ -86,18 +86,14 @@ addr2vref' !vc !addr !m = _addr2vref undefined vc addr m
 _addr2vref :: (VCacheable a) => a -> VSpace -> Address -> Memory -> IO (Memory, VRef a)
 _addr2vref _dummy !vc !addr !m = do
     let ty = typeOf _dummy 
-    mbCacheE <- loadVRefCache addr ty (mem_evrefs m)
-    case mbCacheE of
+    mbCache <- loadVRefCache addr ty (mem_vrefs m)
+    case mbCache of
         Just cache -> return (m, VRef addr cache vc ty get)
         Nothing -> do
-            mbCacheC <- loadVRefCache addr ty (mem_cvrefs m)
-            case mbCacheC of
-                Just cache -> return (m, VRef addr cache vc ty get)
-                Nothing -> do
-                    cache <- newIORef NotCached
-                    e <- mkVREph vc addr cache ty
-                    let m' = m { mem_evrefs = addVREph e (mem_evrefs m) }
-                    m' `seq` return (m', VRef addr cache vc ty get)
+            cache <- newIORef NotCached
+            e <- mkVREph vc addr cache ty
+            let m' = m { mem_vrefs = addVREph e (mem_vrefs m) }
+            m' `seq` return (m', VRef addr cache vc ty get)
 {-# NOINLINE _addr2vref #-}
 
 mkVREph :: VSpace -> Address -> IORef (Cache a) -> TypeRep -> IO VREph
@@ -111,23 +107,24 @@ loadVRefCache !addr !ty !em = mbrun _getVREphCache mbf where
     mbf = Map.lookup addr em >>= Map.lookup ty
 {-# INLINE loadVRefCache #-}
 
--- When a VRef is GC'd from the Haskell layer, we need to delete it
--- from the ephemeron table. Of course, while unlikely, another VRef
--- may have since replaced the existing one. 
+-- When a VRef is GC'd from the Haskell layer, it must be deleted from
+-- the ephemeron table. And deleting it from the cache will also help
+-- the cache manager maintain a valid estimate of cache size.  
+--
+-- There is no guarantee that this operation is timely. It may be called
+-- after the address is brought back into memory. So this function will
+-- double check that it's still working with a 'dead' cache.
 clearVRef :: VSpace -> Address -> TypeRep -> IO ()
-clearVRef !vc !addr !ty = modifyMVarMasked_ (vcache_memory vc) $ \ m -> do
-    evrefs' <- tryDelVREph addr ty (mem_evrefs m)
-    cvrefs' <- tryDelVREph addr ty (mem_cvrefs m)
-    let m' = m { mem_evrefs = evrefs', mem_cvrefs = cvrefs' }
-    return $! m'
-
-tryDelVREph :: Address -> TypeRep -> VREphMap -> IO VREphMap
-tryDelVREph !addr !ty !em =
-    case takeVREph addr ty em of
+clearVRef !vc !addr !ty = delFromCache >> delFromMem where
+    delFromCache = modifyMVarMasked_ (vcache_cvrefs vc) delFrom
+    delFromMem = modifyMVarMasked_ (vcache_memory vc) $ \ m ->
+        delFrom (mem_vrefs m) >>= \ vrefs' ->
+        return $! m { mem_vrefs = vrefs' }
+    delFrom em = case takeVREph addr ty em of
         Nothing -> return em
         Just (VREph { vreph_cache = wk }, em') ->
             Weak.deRefWeak wk >>= \ mbc ->
-            if isJust mbc then return em  -- replaced (improbable; race condition)
+            if isJust mbc then return em  -- replaced since GC; do not delete
                           else return em' -- removed
 
 -- This is certainly an unsafe operation in general, but we have
@@ -237,30 +234,23 @@ newVRefIO vc v cm =
             (c', c' `seq` op)
 {-# NOINLINE newVRefIO #-}
 
--- I've split the mem_vrefs into two partitions, evrefs and cvrefs.
--- This shifts allows the cache manager to focus on just the cvrefs
--- partition, which will typically be much smaller than evrefs.
--- 
--- After a value is first cached, whichever thread was responsible must
--- move the content from the mem_evrefs partition into mem_cvrefs. The
--- cache manager may later move it back and then clear the cache.
+-- Cached values should be represented in the vcache_cvrefs table to
+-- support cache management (i.e. so the manager can focus on just 
+-- the subset of cached values). The cache manager or GC may remove
+-- objects from the vcache_cvrefs table.
 --
--- Cached values may be held temporarily by mem_evrefs, i.e. prior to
--- 'init' or just before the cache is cleared. But NotCached VRefs 
--- should never be held by mem_cvrefs. 
+-- I have an option here, to either create a new weak IORef for the
+-- cache or to reuse the existing one. I'm choosing the latter for
+-- now because I'm not sure how much a burden weak references add to
+-- the GC.
 initVRefCache :: VRef a -> IO ()
-initVRefCache !vref = 
-    let vc = vref_space vref in
-    let addr = vref_addr vref in
-    let ty = vref_type vref in
-    modifyMVarMasked_ (vcache_memory vc) $ \ m -> 
-    case takeVREph addr ty (mem_evrefs m) of
-        Nothing -> fail $ show vref ++ " expected in mem_evrefs partition!"
-        Just (e, evrefs') ->
-            let cvrefs' = addVREph e (mem_cvrefs m) in
-            let m' = m { mem_evrefs = evrefs', mem_cvrefs = cvrefs' } in
-            return $! m'
-{-# NOINLINE initVRefCache #-}
+initVRefCache !r = do
+    let vc = vref_space r 
+    vrefs <- mem_vrefs <$> readMVar (vcache_memory vc)
+    case Map.lookup (vref_addr r) vrefs >>= Map.lookup (vref_type r) of
+        Nothing -> fail $ "VCache bug: " ++ show r ++ " should be in mem_vrefs!"
+        Just e -> modifyMVarMasked_ (vcache_cvrefs vc) $ return . addVREph e
+{-# INLINABLE initVRefCache #-}
 
 -- | Construct a new VRef without initializing the cache.
 newVRefIO' :: (VCacheable a) => VSpace -> a -> IO (VRef a) 
