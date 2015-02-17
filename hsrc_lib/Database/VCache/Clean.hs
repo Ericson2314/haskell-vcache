@@ -54,10 +54,10 @@ cleanStep vc = do
     let hitRate = 
             if ((100 * w0) < ( 80 * wtgt)) then 0.00 else
             if ((100 * w0) < (100 * wtgt)) then 0.01 else
-            if ((100 * w0) < (130 * wtgt)) then 0.02 else
-            if ((100 * w0) < (170 * wtgt)) then 0.03 else
-            if ((100 * w0) < (220 * wtgt)) then 0.04 else 
-            if ((100 * w0) < (280 * wtgt)) then 0.05 else
+            if ((100 * w0) < (120 * wtgt)) then 0.02 else
+            if ((100 * w0) < (150 * wtgt)) then 0.03 else
+            if ((100 * w0) < (190 * wtgt)) then 0.04 else 
+            if ((100 * w0) < (240 * wtgt)) then 0.05 else
             0.06
     xcln vc hitRate
     updateCacheSizeEst vc
