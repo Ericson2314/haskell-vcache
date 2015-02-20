@@ -328,7 +328,7 @@ updateVirtualMemory vc txn allocStart fb =
             bExists <- mdb_cursor_get' MDB_SET cmem pvAddr pvOldData
             unless bExists (addrBug addr "undefined on update")
             oldDeps <- readDataDeps vc addr =<< peek pvOldData
-            let rcs' = addRefcts oldDeps rcs
+            let rcs' = subRefcts oldDeps rcs
             let uf = compileWriteFlags [MDB_CURRENT]
             bOK <- mdb_cursor_put' uf cmem vAddr vData
             unless bOK (addrBug addr "could not updated")
@@ -341,7 +341,7 @@ updateVirtualMemory vc txn allocStart fb =
                    hashVal vOldData >>= \ h ->
                    return (addHash h addr hs)
             oldDeps <- readDataDeps vc addr vOldData
-            let rcs' = addRefcts oldDeps rcs
+            let rcs' = subRefcts oldDeps rcs
             let df = compileWriteFlags []
             mdb_cursor_del' df cmem
             return (UpdateNotes rcs' hs')
@@ -351,12 +351,12 @@ updateVirtualMemory vc txn allocStart fb =
             if (addr >= allocStart) then create rcs addr bytes else
             update rcs addr bytes
 
+
     (UpdateNotes rcOld delSeek) <- foldM processCell emptyNotes (Map.toAscList fb)
     mdb_cursor_close' cmem
 
     assertValidOldDeps allocStart rcOld -- sanity check
-    let rcNew = Map.foldr' (addRefcts . fmap putChildAddr . snd) Map.empty fb
-    let rcDiff = Map.unionWith (-) rcNew rcOld
+    let rcDiff = Map.foldr' (addRefcts . fmap putChildAddr . snd) rcOld fb
     return (UpdateNotes rcDiff delSeek)
 {-# NOINLINE updateVirtualMemory #-}
 
@@ -366,9 +366,15 @@ addHash :: ByteString -> Address -> UpdSeek -> UpdSeek
 addHash h addr = Map.alter f h where
     f = Just . (addr:) . maybe [] id 
 
+-- subtract 1 from each address refct
+subRefcts :: [Address] -> RefctDiff -> RefctDiff
+subRefcts = flip (L.foldl' altr) where
+    altr = flip $ Map.alter (Just . maybe (-1) (subtract 1))
+
+-- add 1 to each address refct
 addRefcts :: [Address] -> RefctDiff -> RefctDiff
 addRefcts = flip (L.foldl' altr) where
-    altr rc addr = Map.alter (Just . maybe 1 (+ 1)) addr rc 
+    altr = flip $ Map.alter (Just . maybe 1 (+ 1))
 
 -- sanity check: we should never have dependencies from
 -- old content into the newly allocated space.   
