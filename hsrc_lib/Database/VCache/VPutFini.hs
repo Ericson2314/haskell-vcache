@@ -36,26 +36,12 @@ import Database.VCache.VPutAux
 -- and that this be applied before any hash functions.
 vputFini :: VPut ()
 vputFini = do
-    szStart <- getBufferSize
-    lChildren <- listChildren
+    szStart <- peekBufferSize
+    lChildren <- peekChildren
     putChildren lChildren
-    szFini <- getBufferSize
+    szFini <- peekBufferSize
     putVarNatR (szFini - szStart)
     -- shrinkBuffer
-
-getBufferSize :: VPut Int
-getBufferSize = VPut $ \ s ->
-    readIORef (vput_buffer s) >>= \ pStart ->
-    let size = (vput_target s) `minusPtr` pStart in
-    size `seq`
-    return (VPutR size s)
-{-# INLINE getBufferSize #-}
-
-listChildren :: VPut [PutChild]
-listChildren = VPut $ \ s ->
-    let r = vput_children s in
-    return (VPutR r s)
-{-# INLINE listChildren #-}
 
 putChildren :: [PutChild] -> VPut ()
 putChildren [] = return ()

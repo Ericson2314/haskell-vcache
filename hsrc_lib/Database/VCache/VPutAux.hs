@@ -8,6 +8,9 @@ module Database.VCache.VPutAux
     , putVarNat
     , putVarInt
     , putVarNatR
+
+    , peekBufferSize
+    , peekChildren
     ) where
 
 import Control.Applicative
@@ -118,3 +121,22 @@ _putVarNatR 0 = return ()
 _putVarNatR n = putWord8 b >> _putVarNatR q where
     b = 0x80 .|. (0x7f .&. fromIntegral n)
     q = n `shiftR` 7
+
+-- | Obtain the number of bytes output by this VPut effort so far.
+-- This might be useful if you're breaking data structures up by their
+-- serialization sizes. This does not include VRefs or PVars, only
+-- raw binary data. See also peekChildCount.
+peekBufferSize :: VPut Int
+peekBufferSize = VPut $ \ s ->
+    readIORef (vput_buffer s) >>= \ pStart ->
+    let size = (vput_target s) `minusPtr` pStart in
+    size `seq`
+    return (VPutR size s)
+{-# INLINE peekBufferSize #-}
+
+peekChildren :: VPut [PutChild]
+peekChildren = VPut $ \ s ->
+    let r = vput_children s in
+    return (VPutR r s)
+{-# INLINE peekChildren #-}
+

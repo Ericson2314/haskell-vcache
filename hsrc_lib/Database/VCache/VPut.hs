@@ -15,11 +15,16 @@ module Database.VCache.VPut
     , reserve, reserving, unsafePutWord8
     , putByteString, putByteStringLazy
     , putc
+
+    , peekBufferSize
+    , peekChildCount
     ) where
 
+import Control.Applicative
 import Data.Bits
 import Data.Char
 import Data.Word
+import qualified Data.List as L
 import Foreign.Ptr (plusPtr,castPtr)
 import Foreign.Storable (Storable(..))
 import Foreign.Marshal.Utils (copyBytes)
@@ -221,4 +226,9 @@ putc a | c <= 0x7f      = putWord8 (fromIntegral c)
         x = fromIntegral (shiftR c 12 .&. 0x3f)
         w = fromIntegral (shiftR c 18 .&. 0x7)
 
+
+-- | Obtain the total count of VRefs and PVars in the VPut buffer.
+peekChildCount :: VPut Int
+peekChildCount = L.length <$> peekChildren
+{-# INLINE peekChildCount #-}
 
