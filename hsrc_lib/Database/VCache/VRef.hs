@@ -1,4 +1,4 @@
-
+{-# LANGUAGE BangPatterns #-}
 
 module Database.VCache.VRef
     ( VRef
@@ -9,11 +9,21 @@ module Database.VCache.VRef
     , vref_space
     , CacheMode(..)
     , vrefc, derefc
+
+    , withVRefBytes
+    , unsafeVRefEncoding
+
     ) where
 
 import Control.Monad
 import Data.IORef
+import Data.Bits
+import Data.Word
+import Data.ByteString (ByteString)
+import Foreign.Ptr
+import Foreign.Storable
 import System.IO.Unsafe 
+
 import Database.VCache.Types
 import Database.VCache.Alloc
 import Database.VCache.Read
@@ -69,10 +79,6 @@ derefc cm v = unsafeDupablePerformIO $
             (c', c' `seq` op)
 {-# NOINLINE derefc #-}
 
-
--- I've modified how VRefs are recorded 
-
-
 -- | Dereference a VRef. This will read from the cache if the value
 -- is available, but will not update the cache. If the value is not
 -- cached, it will be read instead from the persistence layer.
@@ -87,6 +93,38 @@ deref' v = unsafePerformIO $
         Cached r _ -> return r
         NotCached -> liftM fst (readVRef v)
 {-# INLINABLE deref' #-}
+
+-- | Specialized, zero-copy access to a `VRef ByteString`. Access to 
+-- the given ByteString becomes invalid after returning. This operation
+-- may also block the writer if it runs much longer than a single
+-- writer batch (though, writer batches are frequently large enough 
+-- that this shouldn't be a problem if you're careful).
+--
+withVRefBytes :: VRef ByteString -> (Ptr Word8 -> Int -> IO a) -> IO a
+withVRefBytes v action = unsafeVRefEncoding v $ \ p n ->
+    -- valid ByteString encoding: varNat, bytes, 0 (children)
+    readVarNat p 0 >>= \ (p', n') ->
+    let bOK = (p' `plusPtr` n') == (p `plusPtr` (n-1)) in
+    let eMsg = show v ++ " doesn't contain a ByteString" in
+    unless bOK (fail $ "withVRefBytes: " ++ eMsg) >>
+    action p' n'
+
+readVarNat :: Ptr Word8 -> Int -> IO (Ptr Word8, Int)
+readVarNat !p !n =
+    peek p >>= \ w8 ->
+    let p' = p `plusPtr` 1 in
+    let n' = (n `shiftL` 7) + (fromIntegral $ w8 .&. 0x7f) in
+    let bDone = (0 == (w8 .&. 0x80)) in
+    if bDone then return (p', n') else
+    readVarNat p' n'
+    
+-- | Zero-copy access to the raw encoding for any VRef. The given data
+-- becomes invalid after returning. This is provided for mostly for
+-- debugging purposes, i.e. so you can peek under the hood and see how
+-- things are encoded or eyeball the encoding. 
+unsafeVRefEncoding :: VRef any -> (Ptr Word8 -> Int -> IO a) -> IO a
+unsafeVRefEncoding v = withBytesIO (vref_space v) (vref_addr v)
+{-# INLINE unsafeVRefEncoding #-}
 
 -- | Each VRef has an numeric address in the VSpace. This address is
 -- non-deterministic, and essentially independent of the arguments to

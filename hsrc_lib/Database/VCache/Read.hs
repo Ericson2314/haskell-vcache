@@ -2,12 +2,14 @@
 module Database.VCache.Read
     ( readAddrIO
     , readRefctIO
+    , withBytesIO
     ) where
 
 import Control.Monad
 import qualified Data.Map.Strict as Map
 import qualified Data.List as L
 import Control.Concurrent.MVar
+import Data.Word
 import Foreign.Ptr
 import Foreign.Storable
 import Foreign.Marshal.Alloc
@@ -23,7 +25,11 @@ import Database.VCache.Refct
 -- cache weight, or fails. This first tries reading the database, then
 -- falls back to reading from recent allocation frames. 
 readAddrIO :: VSpace -> Address -> VGet a -> IO (a, Int)
-readAddrIO vc addr parser = 
+readAddrIO vc addr = withAddrValIO vc addr . readVal vc
+{-# INLINE readAddrIO #-}
+
+withAddrValIO :: VSpace -> Address -> (MDB_val -> IO a) -> IO a
+withAddrValIO vc addr action = 
     alloca $ \ pAddr ->
     poke pAddr addr >>
     let vAddr = MDB_val { mv_data = castPtr pAddr
@@ -31,18 +37,17 @@ readAddrIO vc addr parser =
                         }
     in
     withRdOnlyTxn vc $ \ txn -> 
-    let db = vcache_db_memory vc in
-    let rd = readVal vc parser in
-    mdb_get' txn db vAddr >>= \ mbData ->
+    mdb_get' txn (vcache_db_memory vc) vAddr >>= \ mbData ->
     case mbData of
-        Just vData -> rd vData -- found data in database (ideal)
+        Just vData -> action vData -- found data in database (ideal)
         Nothing -> -- since not in the database, try the allocator
             let ff = Map.lookup addr . alloc_list in
             readMVar (vcache_memory vc) >>= \ memory ->
             let ac = mem_alloc memory in
             case allocFrameSearch ff ac of
-                Just an -> withByteStringVal (alloc_data an) rd -- found data in allocator
+                Just an -> withByteStringVal (alloc_data an) action -- found data in allocator
                 Nothing -> fail $ "VCache: address " ++ show addr ++ " is undefined!"
+{-# NOINLINE withAddrValIO #-}
 
 readVal :: VSpace -> VGet a -> MDB_val -> IO (a, Int)
 readVal vc p v = _vget (vgetFull p) s0 >>= retv where
@@ -88,5 +93,14 @@ readRefctIO vc addr =
     in
     mdb_get' txn (vcache_db_refcts vc) vAddr >>= \ mbData ->
     maybe (return 0) readRefctBytes mbData
+
+-- | Zero-copy access to raw bytes for an address.
+withBytesIO :: VSpace -> Address -> (Ptr Word8 -> Int -> IO a) -> IO a
+withBytesIO vc addr action = 
+    withAddrValIO vc addr $ \ v -> 
+    action (mv_data v) (fromIntegral (mv_size v))
+{-# INLINE withBytesIO #-}
+
+
 
 

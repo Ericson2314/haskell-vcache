@@ -1,5 +1,5 @@
 Name: vcache
-Version: 0.2.1
+Version: 0.2.2
 Synopsis: large, persistent, memcached values and structure sharing for Haskell 
 Category: Database
 Description:
