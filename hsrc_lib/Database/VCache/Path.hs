@@ -11,28 +11,20 @@ import Database.VCache.Types
 maxPathLen :: Int
 maxPathLen = 511  -- key size limit from LMDB 0.9.10
 
--- | VCache implements a simplified filesystem metaphor. Developers 
--- can assign a distinct prefix for all PVars created by the VCache,
--- thus modeling namespaces or subdirectories. Assuming the normal 
--- advice of opening the VCache only once in the main module, these
--- prefixes enable transparent, modular decomposition of a VCache 
--- application without risk of name collisions.
+-- | VCache implements a simplified filesystem metaphor. By assigning
+-- a different prefix for root PVars loaded by different subprograms,
+-- developers can guard against namespace collisions. Each component
+-- may have its own persistent roots.
+-- 
+-- While I call it a subdirectory, it really is just a prefix. Using
+-- "foo" followed by "bar" is equivalent to using "foobar". Developers
+-- should include their own separators if they expect them, i.e. "foo\/"
+-- and "bar\/".
 --
--- VCache is simplistic about this: a prefix is appended directly.
--- If developers use subdir "foo" followed by "bar", the result is 
--- the same as "foobar". Separators are left to local conventions.
--- Consider "foo/" and "bar/" to model filesystem subdirectories. 
---                 
--- Paths have a limited maximum size of ~500 bytes, including the
--- final PVar name. A runtime error may be generated for oversized
--- paths. In practice, this should not be an issue. 
---
--- Usage Note: Subdirectories allow developers to control risk of
--- namespace collisions between modules or plugins. But they are not
--- intended for domain data! Avoid dynamically creating directories
--- or named PVars based on runtime data. It's better to push most
--- domain logic and schema into the PVar layer, which is subject to
--- rich type safety, GC, potential versioning, and other benefits.
+-- Paths are limited to ~500 bytes. For normal use, this limit will not
+-- be a problem. If you're creating PVars based on runtime inputs, those
+-- should always be dynamic PVars. Root PVar names should never be much 
+-- larger than fully qualified function names.
 --
 vcacheSubdir :: ByteString -> VCache -> VCache
 vcacheSubdir p (VCache vs d) = 
