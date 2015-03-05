@@ -5,6 +5,7 @@ module Database.VCache.VGet
 
     -- * Prim Readers
     , getVRef, getPVar
+    , getVSpace
     , getWord8
     , getWord16le, getWord16be
     , getWord32le, getWord32be
@@ -116,6 +117,11 @@ getPVar = VGet $ \ s ->
             return (VGetR pvar s')
         _ -> return (VGetE "getPVar")
 {-# INLINABLE getPVar #-}
+
+-- | Read the VSpace. This value is constant for a full VGet operation.
+getVSpace :: VGet VSpace 
+getVSpace = VGet $ \ s -> return (VGetR (vget_space s) s)
+{-# INLINE getVSpace #-}
 
 -- | Read words of size 16, 32, or 64 in little-endian or big-endian.
 getWord16le, getWord16be :: VGet Word16

@@ -38,8 +38,8 @@ runVTx' vc mvWait action =
     let wsync' = updateSync bSync mvWait (write_sync w) in
     let w' = Writes { write_data = wdata', write_sync = wsync' } in
     writeTVar (vcache_writes vc) w' >>= \ () ->
-    return $ w' `seq` do
-        signalWriter vc 
+    return $ do
+        w' `seq` signalWriter vc 
         when bSync (takeMVar mvWait)
         return r
 
