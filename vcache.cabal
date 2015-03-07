@@ -1,16 +1,18 @@
 Name: vcache
-Version: 0.2.3
-Synopsis: large, persistent, memcached values and structure sharing for Haskell 
+Version: 0.2.4
+Synopsis: semi-transparent persistence for Haskell above LMDB 
+persistent values, variables, and ACID transactions for Haskell types
 Category: Database
 Description:
   VCache provides a nearly-transparent persistent memory for Haskell
-  with transactional variables, persistent roots, and large structured
-  values. The virtual space is a memory-mapped file via LMDB, with 
-  structure sharing and incremental GC. 
+  supporting ACID transactional variables and large structured values.
+  The virtual address space is modeled above a memory mapped file via
+  LMDB, with structure sharing and incremental reference counting GC.
   .
-  VCache is very similar to packages acid-state, perdure, and TCache.
-  VCache is intended as an acid-state alternative, offering flexibility
-  to model fine-grained variables or extremely large values.
+  VCache was developed as an alternative to acid-state in a context where
+  the persistent data is much bigger than the active working set and RAM.
+  Other similar packages include TCache and perdure. See the home page 
+  for a simple comparison.
   
 Author: David Barbour
 Maintainer: dmbarbour@gmail.com

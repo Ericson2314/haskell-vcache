@@ -118,7 +118,8 @@ getPVar = VGet $ \ s ->
         _ -> return (VGetE "getPVar")
 {-# INLINABLE getPVar #-}
 
--- | Read the VSpace. This value is constant for a full VGet operation.
+-- | Obtain the VSpace associated with content being read. Does not
+-- consume any data.
 getVSpace :: VGet VSpace 
 getVSpace = VGet $ \ s -> return (VGetR (vget_space s) s)
 {-# INLINE getVSpace #-}
