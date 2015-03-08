@@ -19,7 +19,7 @@ Maintainer: dmbarbour@gmail.com
 Homepage: http://github.com/dmbarbour/haskell-vcache
 
 Package-Url: 
-Copyright: (c) 2014 by David Barbour
+Copyright: (c) 2014-2015 by David Barbour
 License: BSD3
 license-file: LICENSE
 Stability: experimental
