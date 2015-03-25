@@ -15,6 +15,9 @@ module Database.VCache.VGet
     , getByteString, getByteStringLazy
     , getc
 
+    -- * zero copy access
+    , withBytes
+
     -- * Parser Combinators
     , isolate
     , label
@@ -230,13 +233,7 @@ getStorable = _getStorable undefined
 {-# INLINE getStorable #-}
 
 _getStorable :: (Storable a) => a -> VGet a
-_getStorable _dummy = 
-    let n = sizeOf _dummy in
-    consuming n $ VGet $ \ s -> do
-        let pTgt = vget_target s 
-        let s' = s { vget_target = pTgt `plusPtr` n }
-        a <- peekAligned (castPtr pTgt)
-        return (VGetR a s')
+_getStorable _dummy = withBytes (sizeOf _dummy) (peekAligned . castPtr)
 {-# INLINE _getStorable #-}
 
 -- | Load a number of bytes from the underlying object. A copy is
@@ -249,20 +246,27 @@ getByteString n | (n > 0)   = _getByteString n
 {-# INLINE getByteString #-}
 
 _getByteString :: Int -> VGet BS.ByteString
-_getByteString n = consuming n $ VGet $ \ s -> do
-    let pSrc = vget_target s
+_getByteString n = withBytes n $ \ pSrc -> do
     pDst <- mallocBytes n
     copyBytes pDst pSrc n
     fp <- newForeignPtr finalizerFree pDst
-    let r = BSI.fromForeignPtr fp 0 n
-    let s' = s { vget_target = (pSrc `plusPtr` n) }
-    return (VGetR r s')
+    return $! BSI.fromForeignPtr fp 0 n
 
 -- | Get a lazy bytestring. (Simple wrapper on strict bytestring.)
 getByteStringLazy :: Int -> VGet LBS.ByteString
 getByteStringLazy n = LBS.fromStrict <$> getByteString n
 {-# INLINE getByteStringLazy #-}
 
+-- | Access a given number of bytes without copying them. These bytes
+-- are read-only, and are considered to be consumed upon returning. 
+-- The pointer should be considered invalid after returning from the
+-- withBytes computation.
+withBytes :: Int -> (Ptr Word8 -> IO a) -> VGet a
+withBytes n action = consuming n $ VGet $ \ s -> do
+    let pTgt = vget_target s  
+    let s' = s { vget_target = pTgt `plusPtr` n }
+    a <- action pTgt
+    return (VGetR a s')
 
 -- | Get a character from UTF-8 format. Assumes a valid encoding.
 -- (In case of invalid encoding, arbitrary characters may be returned.)

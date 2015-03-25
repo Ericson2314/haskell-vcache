@@ -1,7 +1,6 @@
 Name: vcache
 Version: 0.2.4
-Synopsis: semi-transparent persistence for Haskell above LMDB 
-persistent values, variables, and ACID transactions for Haskell types
+Synopsis: semi-transparent persistence for Haskell using LMDB, STM
 Category: Database
 Description:
   VCache provides a nearly-transparent persistent memory for Haskell
