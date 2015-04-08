@@ -6,6 +6,8 @@ module Database.VCache.VPut
 
     -- * Prim Writers
     , putVRef, putPVar
+    , putVSpace
+
     , putWord8
     , putWord16le, putWord16be
     , putWord32le, putWord32be
@@ -72,6 +74,14 @@ _putPVar s pvar =
     let s' = s { vput_children = (c:cs) } in
     return (VPutR () s')
 {-# INLINE _putPVar #-}
+
+-- | Put VSpace doesn't actually output anything, but will fail if
+-- the target space does not match the given one.
+putVSpace :: VSpace -> VPut ()
+putVSpace vc = VPut $ \ s ->
+    if (vput_space s == vc) then return (VPutR () s) else
+    fail $ "putVSpace argument is not same as destination VCache"
+{-# INLINE putVSpace #-}
 
 -- | Put a Word in little-endian or big-endian form.
 --

@@ -341,7 +341,7 @@ data VSpace = VSpace
     --   a channel to talk to that thread
     --   queue of MVars waiting on synchronization/flush.
 
-    }
+    } deriving (Typeable)
 
 instance Eq VSpace where (==) = (==) `on` vcache_signal
 

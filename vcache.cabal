@@ -1,5 +1,5 @@
 Name: vcache
-Version: 0.2.4
+Version: 0.2.5
 Synopsis: semi-transparent persistence for Haskell using LMDB, STM
 Category: Database
 Description:
@@ -25,9 +25,14 @@ Stability: experimental
 build-type: Simple
 cabal-version: >= 1.16.0.3
 
+Extra-source-files:
+    README.md 
+    changelog.md
+
 Source-repository head
   type: git
   location: http://github.com/dmbarbour/haskell-vcache.git
+
 
 Library
   hs-Source-Dirs: hsrc_lib
