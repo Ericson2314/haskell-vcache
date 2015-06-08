@@ -14,3 +14,5 @@
 * **0.2.5**
  * added changelog
  * added putVSpace and VSpace VCacheable instance
+* **0.2.6**
+ * fix a severe buffer resize bug for allocating large VCache nodes

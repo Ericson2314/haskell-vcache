@@ -76,7 +76,7 @@ runVPutIO vs action = do
     (VPutR r sf) <- runPut `onException` freeBuff
     pBuff' <- readIORef vBuff
     let len = vput_target sf `minusPtr` pBuff'
-    pBuffR <- reallocBytes pBuff len -- reclaim unused space
+    pBuffR <- reallocBytes pBuff' len -- reclaim unused space
     fpBuff' <- newForeignPtr finalizerFree pBuffR
     let bytes = BSI.fromForeignPtr fpBuff' 0 len
     return (r, bytes, vput_children sf)
