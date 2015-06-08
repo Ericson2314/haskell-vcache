@@ -48,4 +48,4 @@ Developers are permitted to model cyclic structures using PVars. However, the na
 Performance
 -----------
 
-VCache performance is not very good yet. It hasn't been heavily optimized. What I would like to do is switch to using Bytestring.Builder in the background, together with accumulating a list of vref/pvar children. Based on some preliminary tests, this could greatly improve write performance. As is, you should use bytestrings when storing large objects. They're a lot faster.
+VCache performance is not very good yet. It hasn't been heavily optimized. What I would like to do is switch to using Bytestring.Builder in the background together with accumulating the list of vref/pvar children. Based on some preliminary tests, this could improve write performance and simplify the code, and might also permit compressed encodings. As is, you should use bytestrings where feasible, especially if working with large binary data.
