@@ -44,3 +44,8 @@ VCache is not a database. Features for search, query, query optimization, index,
 This package does not provide the datatypes to make VCache especially useful. Container types - B-trees, tries, finger-trees, ropes, arrays, hashmaps, etc. - implemented leveraging VRefs type would make it a lot easier to pick up and use VCache. This package does not provide type versioning. A variation of SafeCopy for the VCacheable instance seems a worthy investment, but is not a major priority at this time.
 
 Developers are permitted to model cyclic structures using PVars. However, the naive reference counting used by VCache will not garbage collect cycles. Developers must be careful to break cycles when finished with them or they will leak space at the persistence layer. This isn't an especially difficult burden, but it's something to keep in mind.
+
+Performance
+-----------
+
+VCache performance is not very good yet. It hasn't been heavily optimized. What I would like to do is switch to using Bytestring.Builder in the background, together with accumulating a list of vref/pvar children. Based on some preliminary tests, this could greatly improve write performance. As is, you should use bytestrings when storing large objects. They're a lot faster.
