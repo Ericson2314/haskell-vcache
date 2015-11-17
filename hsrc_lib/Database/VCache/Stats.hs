@@ -28,9 +28,6 @@ data VCacheStats = VCacheStats
         , vcstat_cache_limit    :: {-# UNPACK #-} !Int  -- ^ target cache size in bytes 
         , vcstat_cache_size     :: {-# UNPACK #-} !Int  -- ^ estimated cache size in bytes
         , vcstat_gc_count       :: {-# UNPACK #-} !Int  -- ^ number of addresses GC'd by this process
-        , vcstat_write_pvars    :: {-# UNPACK #-} !Int  -- ^ number of PVar updates to disk (after batching)
-        , vcstat_write_sync     :: {-# UNPACK #-} !Int  -- ^ number of sync requests (~ durable transactions)
-        , vcstat_write_frames   :: {-# UNPACK #-} !Int  -- ^ number of LMDB-layer transactions by this process
         } deriving (Show, Ord, Eq)
 
 -- | Compute some miscellaneous statistics for a VCache instance at
@@ -47,7 +44,6 @@ vcacheStats vc = withRdOnlyTxn vc $ \ txnStat -> do
     ephStat <- mdb_stat' txnStat (vcache_db_refct0 vc)
     memory <- readMVar (vcache_memory vc)
     gcCount <- readIORef (vcache_gc_count vc)
-    wct <- readIORef (vcache_ct_writes vc)
     cLimit <- readIORef (vcache_climit vc)
     cSizeEst <- readIORef (vcache_csize vc)
     cvrefs <- readMVar (vcache_cvrefs vc)
@@ -77,9 +73,6 @@ vcacheStats vc = withRdOnlyTxn vc $ \ txnStat -> do
         , vcstat_alloc_count = allocCount
         , vcstat_cache_limit = cLimit
         , vcstat_cache_size = cacheSizeBytes
-        , vcstat_write_sync = wct_sync wct
-        , vcstat_write_pvars = wct_pvars wct
-        , vcstat_write_frames = wct_frames wct
         , vcstat_gc_count = gcCount
         }
 

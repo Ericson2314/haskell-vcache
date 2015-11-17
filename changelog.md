@@ -16,3 +16,5 @@
  * added putVSpace and VSpace VCacheable instance
 * **0.2.6**
  * fix a severe buffer resize bug for allocating large VCache nodes
+* **0.2.7**
+ * (issue #4) performance work, GC transient allocations without write

@@ -1,5 +1,5 @@
 Name: vcache
-Version: 0.2.6
+Version: 0.2.7
 Synopsis: semi-transparent persistence for Haskell using LMDB, STM
 Category: Database
 Description:

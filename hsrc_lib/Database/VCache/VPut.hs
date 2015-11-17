@@ -53,7 +53,8 @@ putVRef ref = VPut $ \ s ->
 _putVRef :: VPutS -> VRef a -> IO (VPutR ())
 _putVRef s ref = 
     let cs = vput_children s in
-    let c  = PutChild (Right ref) in
+    let c  = vref_addr ref in
+    c `seq` -- don't hold onto vref
     let s' = s { vput_children = (c:cs) } in
     return (VPutR () s')
 {-# INLINE _putVRef #-}
@@ -70,7 +71,8 @@ putPVar pvar = VPut $ \ s ->
 _putPVar :: VPutS -> PVar a -> IO (VPutR ())
 _putPVar s pvar = 
     let cs = vput_children s in
-    let c  = PutChild (Left pvar) in
+    let c = pvar_addr pvar in
+    c `seq` -- don't hold onto pvar
     let s' = s { vput_children = (c:cs) } in
     return (VPutR () s')
 {-# INLINE _putPVar #-}

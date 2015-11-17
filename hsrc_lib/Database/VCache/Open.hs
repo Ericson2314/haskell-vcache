@@ -143,7 +143,6 @@ openVC' nBytes fl fp = do
         cLimit <- newIORef vcDefaultCacheLimit
         cSize <- newIORef vcInitCacheSizeEst
         cVRefs <- newMVar Map.empty
-        ctWrites <- newIORef $ WriteCt 0 0 0
         gcStart <- newIORef Nothing
         gcCount <- newIORef 0
         rwLock <- newRWLock
@@ -170,8 +169,6 @@ openVC' nBytes fl fp = do
                     , vcache_climit = cLimit
                     , vcache_csize = cSize
                     , vcache_cvrefs = cVRefs
-                    , vcache_signal_writes = updWriteCt ctWrites
-                    , vcache_ct_writes = ctWrites
                     , vcache_alloc_init = allocStart
                     , vcache_gc_start = gcStart
                     , vcache_gc_count = gcCount
@@ -207,14 +204,6 @@ initMemory addr = m0 where
     gcf = GCFrame Map.empty
     gc = GC gcf gcf
     m0 = Memory Map.empty Map.empty gc ac
-
--- Update write counts.
-updWriteCt :: IORef WriteCt -> Writes -> IO ()
-updWriteCt var w = modifyIORef' var $ \ wct ->
-    let frmCt = 1 + wct_frames wct in
-    let pvCt = wct_pvars wct + Map.size (write_data w) in
-    let synCt = wct_sync wct + L.length (write_sync w) in
-    WriteCt { wct_frames = frmCt, wct_pvars = pvCt, wct_sync = synCt }
 
 -- | Create background threads needed by VCache.
 initVCacheThreads :: VSpace -> IO ()

@@ -4,6 +4,7 @@
 --
 -- Some general design goals here:
 --
+--   Avoid writing short-lived 
 --   Favor sequential processing (not random access)
 --   Single read/write pass per database per frame
 --   Append newly written content when possible
@@ -31,8 +32,10 @@ import Data.IORef
 import Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.List as L
+import Data.Traversable (traverse)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified System.Mem as Mem
 import Foreign.Ptr
 import Foreign.Storable
 import Foreign.Marshal.Alloc
@@ -58,8 +61,9 @@ type RefctDiff = Map Address Refct
 -- Note: if a WriteCell has a null ByteString, this means we'll delete
 -- the content. Empty bytestring is impossible as output from VPut
 -- because we have at least a size for the child list.
-type WriteBatch = Map Address WriteCell
-type WriteCell = (ByteString, [PutChild])
+--
+-- 
+type WriteBatch = Map Address ByteString
 type GCBatch = WriteBatch
 
 -- for updating secondary indices, track names to addresses 
@@ -73,28 +77,27 @@ writeStep :: VSpace -> IO ()
 writeStep vc = withRWLock (vcache_rwlock vc) $ do
     takeMVar (vcache_signal vc) 
 
-    -- acquire writes, allocations, GC for this step
-    ws <- atomically (takeWrites (vcache_writes vc))
-    wb <- seralizeWrites (write_data ws)
-    afrm <- allocFrameStep vc
-    let allocInit = alloc_init afrm 
-    let ab = fmap fnWriteAlloc (alloc_list afrm) -- alloc batch
-    let ub = Map.union wb ab                     -- update batch (favor writes)
+    -- prepare update batch (allocations, writes)
+    (Writes wlog wsync) <- atomically (takeWrites (vcache_writes vc))
+    pvb <- seralizeWrites vc wlog -- PVar states as bytestrings
+    Mem.performMinorGC -- force nursery GC on Haskell's side
+    (ub, afrm) <- stepWriteFrame vc pvb
+    let allocInit = alloc_addr afrm
 
-    -- LMDB-layer read-write transaction.
+    -- prepare LMDB-layer read-write transaction.
     txn <- mdb_txn_begin (vcache_db_env vc) Nothing False
 
-    -- select addresses for garbage collection 
-    let gcLimit = 1000 + 2 * Map.size ub -- adaptive GC rate
+    -- select zero-refct addresses for garbage collection 
+    let gcLimit = 1000 + (2 * Map.size ub) -- adaptive GC rate
     gcb <- runGarbageCollector vc txn gcLimit
 
     -- update the db_memory. allocs, writes, deletes.
-    let fb = Map.union gcb ub -- full batch
+    let fb = Map.union gcb wb -- full batch
     let bUpdGCSep = Map.size fb == (Map.size ub + Map.size gcb) 
     unless bUpdGCSep (fail "VCache bug: overlapping GC and update targets")
     (UpdateNotes rcDiff hsDel) <- updateVirtualMemory vc txn allocInit fb
 
-    -- Update reference counts, +1 for new roots.
+    -- Update reference counts, +1 for new named roots.
     let rcAlloc = fmap (\ an -> if isNewRoot an then 1 else 0) (alloc_list afrm)
     let rcUpd = Map.unionWith (\ a b -> (a + b)) rcDiff rcAlloc 
     updateReferenceCounts vc txn allocInit rcUpd
@@ -107,11 +110,54 @@ writeStep vc = withRWLock (vcache_rwlock vc) $ do
     -- Finish writeStep: commit, synch, stats, signals.
     mdb_txn_commit txn -- LMDB commit & synch
     modifyIORef' (vcache_gc_count vc) (+ (Map.size gcb)) -- update GC count
-    vcache_signal_writes vc ws -- report write stats
-    mapM_ syncSignal (write_sync ws) -- signal waiting threads
+    forM_ wsync syncSignal -- signal waiting threads
 {-# NOINLINE writeStep #-}
 
--- Interact with GC and Allocation. Only safe once per writeStep.
+{-
+-- Atomically step to the next write frame, returning the current write
+-- frame. This is now more complicated because of 'nursery GC', that is
+-- we perform a reachability analysis for our new allocations at time of
+-- write. 
+--
+-- Our reachability analysis:
+--
+--   writes to PVars older than the nursery are roots
+--   addresses held by mem_vrefs or mem_pvars are roots
+--   writes transitively reachable from from the above roots
+--
+-- The number of entangled responsibilities (due to MVar-based atomicity)
+-- is rather painful here. However, I do separate the issue of providing
+-- the set of PVar writes.
+--
+-- There are a lot of entangled responsibilities here. Atomically, we
+-- must GC the nursery, allocate our next frame, and filter our existing
+-- frame to forbid 'revival' of addresses we chose to not write.
+--
+stepWriteFrame :: VSpace -> WriteBatch -> IO (WriteBatch, Address)
+stepWriteFrame vc wb0 = modifyMVarMasked (vcache_memory vc) $ \ m -> do
+    let ac = mem_alloc m
+    let addr = alloc_new_addr ac
+    let nursery = alloc_frm_next ac
+    let rooted a = (a < (alloc_addr nursery)) 
+                || (Map.member a (mem_vrefs m)) 
+                || (Map.member a (mem_pvars m))
+    let oldWrite a = (a <= allocInit) 
+    let isRooted a = (a <= allocInit) || 
+
+
+isPVarAddr a &&
+    let (ub, frm') = withNurseryGC m 
+    let ac' = Allocator
+            { alloc_new_addr = addr
+            , alloc_frm_next = AllocFrame Map.empty Map.empty addr
+            , alloc_frm_curr = withFrameGC 
+
+    Mem.performMinorGC -- Haskell-side nursery GC
+    (ub,allocInit) <- prepareWriterFrame vc wb 
+-}
+
+-- Shift the allocation frame. This is safe once per write frame.
+-- This preserves information about older writes in memory, preventing
 allocFrameStep :: VSpace -> IO AllocFrame
 allocFrameStep vc = modifyMVarMasked (vcache_memory vc) $ \ m -> do
     let ac = mem_alloc m
@@ -121,6 +167,7 @@ allocFrameStep vc = modifyMVarMasked (vcache_memory vc) $ \ m -> do
             , alloc_frm_next = AllocFrame Map.empty Map.empty addr
             , alloc_frm_curr = alloc_frm_next ac
             , alloc_frm_prev = alloc_frm_curr ac
+            -- old alloc_frm_prev is GC'd.
             }
     let m' = m { mem_alloc = ac' }
     return (m', alloc_frm_curr ac')
@@ -134,19 +181,14 @@ takeWrites tv = do
     writeTVar tv (Writes Map.empty [])
     return wb
 
-seralizeWrites :: WriteLog -> IO WriteBatch
-seralizeWrites = Map.traverseWithKey (const writeTxW)
+seralizeWrites :: VSpace -> WriteLog -> IO WriteBatch
+seralizeWrites = traverse . writeTxW
 
-writeTxW :: TxW -> IO WriteCell
-writeTxW (TxW pv v) =
-    runVPutIO (pvar_space pv) (pvar_write pv v) >>= \ ((), _data, _deps) ->
-    return (_data,_deps)
-
-fnWriteAlloc :: Allocation -> WriteCell
-fnWriteAlloc an = (alloc_data an, alloc_deps an)
+writeTxW :: VSpace -> TxW -> IO WriteCell
+writeTxW vc (TxW wf v) = snd <$> runVPutIO vc (wf v)
 
 syncSignal :: MVar () -> IO ()
-syncSignal mv = void (tryPutMVar mv ())
+syncSignal = void . flip tryPutMVar ()
 
 -- Write the PVar roots and VRef hashmap. In these cases, the address
 -- is the data, and a bytestring (a path or hash) is the key. I'm using
@@ -356,7 +398,7 @@ updateVirtualMemory vc txn allocStart fb =
     mdb_cursor_close' cmem
 
     assertValidOldDeps allocStart rcOld -- sanity check
-    let rcDiff = Map.foldr' (addRefcts . fmap putChildAddr . snd) rcOld fb
+    let rcDiff = Map.foldr' (addRefcts . snd) rcOld fb
     return (UpdateNotes rcDiff delSeek)
 {-# NOINLINE updateVirtualMemory #-}
 

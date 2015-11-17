@@ -41,27 +41,24 @@ vputFini = do
     putChildren lChildren
     szFini <- peekBufferSize
     putVarNatR (szFini - szStart)
-    -- shrinkBuffer
+    -- shrinkBuffer? no need, should GC soon.
 
-putChildren :: [PutChild] -> VPut ()
-putChildren [] = return ()
-putChildren (x:xs) = 
-    let addr0 = putChildAddr x in
-    putVarNat (fromIntegral addr0) >>
-    putChildren' addr0 xs
+-- putChildren is already a stack (last in first out), so we'll just
+-- write them in order. Later, when we read our bytestring, we'll compute
+-- a new stack in reverse order from the order we wrote them here, which
+-- is optimal for reading.
+putChildren :: [Address] -> VPut ()
+putChildren = go 0 where
+    go _ [] = return ()
+    go p (x:xs) = 
+        let offset = (fromIntegral x) - (fromIntegral p) in
+        putVarInt offset >> go x xs
 
--- putChildren after the first, using offsets.
-putChildren' :: Address -> [PutChild] -> VPut ()
-putChildren' _ [] = return ()
-putChildren' !prev (x:xs) = 
-    let addrX = putChildAddr x in
-    let offset = (fromIntegral addrX) - (fromIntegral prev) in
-    putVarInt offset >>
-    putChildren' addrX xs
-
-runVPutIO :: VSpace -> VPut a -> IO (a, ByteString, [PutChild])
+-- Obtain a strict bytestring corresponding to VPut output.
+-- Also returns any other computed result, usually `()`.
+runVPutIO :: VSpace -> VPut a -> IO (a, ByteString)
 runVPutIO vs action = do
-    let initialSize = 1000 -- avoid reallocs for small data
+    let initialSize = 2000 -- avoid reallocs for small records
     pBuff <- mallocBytes initialSize
     vBuff <- newIORef pBuff
     let s0 = VPutS { vput_space = vs
@@ -72,16 +69,15 @@ runVPutIO vs action = do
                    }
     let freeBuff = readIORef vBuff >>= free
     let fullWrite = do { result <- action; vputFini; return result }
-    let runPut = _vput fullWrite s0
-    (VPutR r sf) <- runPut `onException` freeBuff
+    (VPutR r sf) <- _vput fullWrite s0 `onException` freeBuff
     pBuff' <- readIORef vBuff
     let len = vput_target sf `minusPtr` pBuff'
     pBuffR <- reallocBytes pBuff' len -- reclaim unused space
     fpBuff' <- newForeignPtr finalizerFree pBuffR
     let bytes = BSI.fromForeignPtr fpBuff' 0 len
-    return (r, bytes, vput_children sf)
+    return (r, bytes)
 {-# NOINLINE runVPutIO #-}
 
-runVPut :: VSpace -> VPut a -> (a, ByteString, [PutChild])
+runVPut :: VSpace -> VPut a -> (a, ByteString)
 runVPut vs action = unsafePerformIO (runVPutIO vs action)
 

@@ -134,7 +134,7 @@ peekBufferSize = VPut $ \ s ->
     return (VPutR size s)
 {-# INLINE peekBufferSize #-}
 
-peekChildren :: VPut [PutChild]
+peekChildren :: VPut [Address]
 peekChildren = VPut $ \ s ->
     let r = vput_children s in
     return (VPutR r s)

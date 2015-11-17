@@ -9,7 +9,7 @@ module Database.VCache.Types
     , PVar(..), RDV(..)
     , PVEph(..), PVEphMap, addPVEph
     , VCache(..), VSpace(..)
-    , VPut(..), VPutS(..), VPutR(..), PutChild(..), putChildAddr
+    , VPut(..), VPutS(..), VPutR(..)
     , VGet(..), VGetS(..), VGetR(..)
     , VCacheable(..)
     , Allocator(..), AllocFrame(..), Allocation(..)
@@ -242,8 +242,10 @@ data PVar a = PVar
     , pvar_data  :: {-# UNPACK #-} !(TVar (RDV a))
     , pvar_space :: !VSpace -- ^ virtual address space for PVar
     , pvar_type  :: !TypeRep
-    , pvar_write :: !(a -> VPut ())
+    , pvar_write :: !(Writer a)
     } deriving (Typeable)
+
+type Writer a = (a -> VPut ())
 instance Eq (PVar a) where (==) = (==) `on` pvar_data
 instance Show (PVar a) where 
     showsPrec _ pv = showString "PVar#" . shows (pvar_addr pv)
@@ -313,14 +315,8 @@ data VSpace = VSpace
 
     , vcache_memory     :: !(MVar Memory) -- Haskell-layer memory management
     , vcache_signal     :: !(MVar ()) -- signal writer that work is available
-    , vcache_writes     :: !(TVar Writes) -- STM layer PVar writes
+    , vcache_writes     :: !(TVar Writes) -- STM-layer PVar writes
     , vcache_rwlock     :: !RWLock -- replace gap left by MDB_NOLOCK
-
-
-    -- Signal writes mostly exists to prevent GC of PVars until after 
-    -- any updated PVars are durable. I also use it to maintain stats. :)
-    , vcache_signal_writes :: !(Writes -> IO ()) -- signal durable writes
-    , vcache_ct_writes  :: !(IORef WriteCt) -- (stat) information about writes
 
     , vcache_alloc_init :: {-# UNPACK #-} !Address -- (for stats) initial allocator on open
 
@@ -374,16 +370,9 @@ data Allocator = Allocator
     }
 
 data AllocFrame = AllocFrame 
-    { alloc_list :: !(Map Address Allocation)       -- allocated addresses
-    , alloc_seek :: !(Map ByteString [Allocation])  -- named addresses
-    , alloc_init :: {-# UNPACK #-} !Address         -- alloc_new_addr at frame init.
-    }
-
-data Allocation = Allocation
-    { alloc_name :: {-# UNPACK #-} !ByteString -- VRef hash or PVar path, or empty for anon PVar
-    , alloc_data :: {-# UNPACK #-} !ByteString -- initial content
-    , alloc_addr :: {-# UNPACK #-} !Address    -- where to save content
-    , alloc_deps :: [PutChild]                 -- keepalive for allocation
+    { alloc_list :: !(Map Address ByteString)    -- recent allocations
+    , alloc_seek :: !(Map ByteString [Address])  -- recent allocations by name 
+    , alloc_init :: {-# UNPACK #-} !Address      -- alloc_new_addr at frame init.
     }
 
 allocFrameSearch :: (AllocFrame -> Maybe a) -> Allocator -> Maybe a
@@ -395,12 +384,16 @@ allocFrameSearch f a = f n <|> f c <|> f p where
 -- | In addition to recent allocations, we track garbage collection.
 -- The goal here is to prevent revival of VRefs after we decide to
 -- delete them. So, when we try to allocate a VRef, we'll check to
--- see if it's address has been targeted for deletion.
+-- see whether its address has been targeted for deletion.
 --
 -- To keep this simple, GC is performed by the writer thread. Other
 -- threads must worry about reading outdated reference counts. This
 -- also means we only need the two frames: a reader of frame N-2  
 -- only needs to prevent revival of VRefs GC'd at N-1 or N.
+--
+-- ASIDE: a nursery GC pass eliminates transient VRefs that needn't
+-- be recorded in the database, e.g. for a short-lived trie node. In
+-- this case, we may simply remove the reference from the allocator.
 --
 data GC = GC 
     { gc_frm_curr :: !GCFrame
@@ -474,11 +467,11 @@ getVTxSpace :: VTx VSpace
 getVTxSpace = VTx (gets vtx_space)
 {-# INLINE getVTxSpace #-}
 
--- | add a PVar write to the VTxState.
--- (Does not modify the underlying TVar.)
+-- | add a PVar write to the VTxState. This should be combined with
+-- a function that modifies the underlying TVar.
 markForWrite :: PVar a -> a -> VTx ()
 markForWrite pv a = VTx $ modify $ \ vtx ->
-    let txw = TxW pv a in
+    let txw = TxW (pvar_write pv) a in
     let addr = pvar_addr pv in
     let writes' = Map.insert addr txw (vtx_writes vtx) in
     vtx { vtx_writes = writes' }
@@ -494,14 +487,13 @@ data CacheSizeEst = CacheSizeEst
     , csze_addr_sqsz  :: {-# UNPACK #-} !Double -- average of squares
     }
 
-
-
-type WriteLog  = Map Address TxW
-data TxW = forall a . TxW !(PVar a) a
+type WriteLog  = Map Address TxW 
+data TxW = forall a . TxW !(Writer a) a
     -- Note: I can either record just the PVar, or the PVar and its value.
     -- The latter is favorable because it avoids risk of creating very large
     -- transactions in the writer thread (i.e. to read the updated PVars).
 
+-- | Collection of writes 
 data Writes = Writes 
     { write_data :: !WriteLog
     , write_sync :: ![MVar ()]
@@ -533,21 +525,12 @@ type PtrLoc = Ptr8
 -- in reverse such that readers won't need to reverse the list.
 newtype VPut a = VPut { _vput :: VPutS -> IO (VPutR a) }
 data VPutS = VPutS 
-    { vput_space    :: !VSpace 
-    , vput_children :: ![PutChild] -- ^ addresses written
-    , vput_buffer   :: !(IORef PtrIni) -- ^ current buffer for easy free
+    { vput_space    :: !VSpace                -- ^ destination space
+    , vput_children :: ![Address]             -- ^ addresses written (addends buffer)
+    , vput_buffer   :: !(IORef PtrIni)        -- ^ buffer for easy free, realloc
     , vput_target   :: {-# UNPACK #-} !PtrLoc -- ^ location within buffer
     , vput_limit    :: {-# UNPACK #-} !PtrEnd -- ^ current limit for input
     }
-    -- note: vput_buffer is an IORef mostly to simplify error handling.
-    --  On error, we'll need to free the buffer. However, it may be 
-    --  reallocated many times during serialization of a large value,
-    --  so we need easy access to the final value.
-data PutChild = forall a . PutChild (Either (PVar a) (VRef a))
-
-putChildAddr :: PutChild -> Address
-putChildAddr (PutChild (Left (PVar { pvar_addr = x }))) = x
-putChildAddr (PutChild (Right (VRef { vref_addr = x }))) = x
 
 
 data VPutR r = VPutR

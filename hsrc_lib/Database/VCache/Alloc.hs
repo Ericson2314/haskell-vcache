@@ -268,8 +268,8 @@ newVRefIO' !vc v =
 -- If a match is discovered, we'll use the existing address. Otherwise,
 -- we'll allocate a new address and leave it to the background writer thread.
 --
-allocVRefIO :: (VCacheable a) => VSpace -> ByteString -> [PutChild] -> IO (VRef a)
-allocVRefIO !vc !_data !_deps = 
+allocVRefIO :: (VCacheable a) => VSpace -> ByteString -> IO (VRef a)
+allocVRefIO !vc !_data = 
     let _name = hash _data in
     withByteStringVal _name $ \ vName ->
     withByteStringVal _data $ \ vData ->
@@ -280,15 +280,15 @@ allocVRefIO !vc !_data !_deps =
         Just !vref -> return vref -- found matching VRef in database
         Nothing -> modifyMVarMasked (vcache_memory vc) $ \ m -> 
             let okAddr addr = isVRefAddr addr && not (recentGC (mem_gc m) addr) in
-            let match an = okAddr (alloc_addr an) && (_data == (alloc_data an)) in
-            let ff frm = Map.lookup _name (alloc_seek frm) >>= L.find match in
+            let okData frm addr = maybe False ((==) _data . alloc_data) (Map.lookup addr (alloc_list frm)) in
+            let match frm addr = okAddr addr && okData frm addr in
+            let ff frm = Map.lookup _name (alloc_seek frm) >>= L.find (match frm) in 
             case allocFrameSearch ff (mem_alloc m) of
-                Just an -> addr2vref' vc (alloc_addr an) m -- found among recent allocations
+                Just addr -> addr2vref' vc addr m -- found among recent allocations
                 Nothing -> do -- allocate a new VRef address
                     let ac = mem_alloc m
                     let addr = alloc_new_addr ac
-                    let an = Allocation { alloc_name = _name, alloc_data = _data
-                                        , alloc_deps = _deps, alloc_addr = addr }
+                    let an = Allocation { alloc_name = _name, alloc_data = _data, alloc_addr = addr }
                     let frm' = addToFrame an (alloc_frm_next ac) 
                     let ac' = ac { alloc_new_addr = 2 + addr, alloc_frm_next = frm' }
                     let m' = m { mem_alloc = ac' }
@@ -378,13 +378,13 @@ seek f (x:xs) = f x >>= continue where
 data AllocPVar a = AllocPVar
     { alloc_pvar_name :: !ByteString
     , alloc_pvar_data :: !ByteString
-    , alloc_pvar_deps :: ![PutChild]
     , alloc_pvar_tvar :: !(TVar (RDV a))
     }
 
 -- | Create a new, anonymous PVar as part of an active transaction.
 -- Contents of the new PVar are not serialized unless the transaction
--- commits (though a placeholder is still allocated). 
+-- commits (though a placeholder may be allocated if the PVar remains
+-- in memory during a write frame).  
 newPVar :: (VCacheable a) => a -> VTx (PVar a)
 newPVar x = do
     vc <- getVTxSpace
@@ -399,14 +399,13 @@ allocPlaceHolder :: ByteString -> TVar (RDV a) -> AllocPVar a
 allocPlaceHolder _name tvar = AllocPVar
     { alloc_pvar_name = _name
     , alloc_pvar_data = BS.singleton 0
-    , alloc_pvar_deps = []
     , alloc_pvar_tvar = tvar 
     }
 
 -- | Create a new, anonymous PVar via the IO monad. This is similar
 -- to `newTVarIO`, but not as well motivated: global PVars should
--- almost certainly be constructed as named, persistent roots. 
--- 
+-- almost certainly be constructed as named, persistent roots. OTOH,
+-- it may be useful for modeling persistent thunks or similar.
 newPVarIO :: (VCacheable a) => VSpace -> a -> IO (PVar a)
 newPVarIO vc x = do
     apv <- preAllocPVarIO vc BS.empty x
@@ -417,11 +416,10 @@ newPVarIO vc x = do
 preAllocPVarIO :: (VCacheable a) => VSpace -> ByteString -> a -> IO (AllocPVar a)
 preAllocPVarIO vc _name x = do
     tvar <- newTVarIO (RDV x)
-    ((), _data, _deps) <- runVPutIO vc (put x)
+    ((), _data) <- runVPutIO vc (put x)
     return $! AllocPVar
         { alloc_pvar_name = _name
         , alloc_pvar_data = _data
-        , alloc_pvar_deps = _deps
         , alloc_pvar_tvar = tvar
         }
 
@@ -476,7 +474,6 @@ _allocPVar _dummy !vc !apv !m = do
             { alloc_name = alloc_pvar_name apv
             , alloc_data = alloc_pvar_data apv
             , alloc_addr = pv_addr
-            , alloc_deps = alloc_pvar_deps apv
             }
     let frm' = addToFrame an (alloc_frm_next ac)
     let addr' = 2 + alloc_new_addr ac
