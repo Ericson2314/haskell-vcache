@@ -7,7 +7,6 @@ module Database.VCache.Read
 
 import Control.Monad
 import qualified Data.Map.Strict as Map
-import qualified Data.List as L
 import Control.Concurrent.MVar
 import Data.Word
 import Foreign.Ptr
@@ -23,7 +22,8 @@ import Database.VCache.Refct
 
 -- | Parse contents at a given address. Returns both the value and the
 -- cache weight, or fails. This first tries reading the database, then
--- falls back to reading from recent allocation frames. 
+-- falls back to reading from recent allocation frames. If the address
+-- does not have defined data at either location, this will fail.
 readAddrIO :: VSpace -> Address -> VGet a -> IO (a, Int)
 readAddrIO vc addr = withAddrValIO vc addr . readVal vc
 {-# INLINE readAddrIO #-}
@@ -45,41 +45,34 @@ withAddrValIO vc addr action =
             readMVar (vcache_memory vc) >>= \ memory ->
             let ac = mem_alloc memory in
             case allocFrameSearch ff ac of
-                Just an -> withByteStringVal (alloc_data an) action -- found data in allocator
+                Just _data -> withByteStringVal _data action -- found data in allocator
                 Nothing -> fail $ "VCache: address " ++ show addr ++ " is undefined!"
 {-# NOINLINE withAddrValIO #-}
 
 readVal :: VSpace -> VGet a -> MDB_val -> IO (a, Int)
 readVal vc p v = _vget (vgetFull p) s0 >>= retv where
+    size = fromIntegral (mv_size v)
     s0 = VGetS { vget_children = []
                , vget_target = mv_data v
-               , vget_limit = mv_data v `plusPtr` fromIntegral (mv_size v)
+               , vget_limit = mv_data v `plusPtr` size
                , vget_space = vc
                }
-    retv (VGetR result _) = return result
+    retv (VGetR result _) = return (result, size)
     retv (VGetE eMsg) = fail eMsg
 
--- get the full value and weight
-vgetFull :: VGet a -> VGet (a, Int)
-vgetFull parser = do
+-- vget with initializer for dependencies.
+-- asserts that we parse all available input.
+vgetFull :: VGet a -> VGet a
+vgetFull parse = do
     vgetInit 
-    w <- vgetWeight
-    r <- parser
+    r <- parse
     assertDone
-    return (r,w)
+    return r
 
 assertDone :: VGet ()
 assertDone = isEmpty >>= \ b -> unless b (fail emsg) where
     emsg = "VCache: failed to read full input" 
 {-# INLINE assertDone #-}
-
-vgetWeight :: VGet Int
-vgetWeight = VGet $ \ s ->
-    let nBytes = vget_limit s `minusPtr` vget_target s in
-    let nRefs = L.length (vget_children s) in
-    let w = cacheWeight nBytes nRefs in
-    w `seq` return (VGetR w s)
-{-# INLINE vgetWeight #-}
 
 
 -- | Read a reference count for a given address. 

@@ -12,7 +12,7 @@ module Database.VCache.Types
     , VPut(..), VPutS(..), VPutR(..)
     , VGet(..), VGetS(..), VGetR(..)
     , VCacheable(..)
-    , Allocator(..), AllocFrame(..), Allocation(..)
+    , Allocator(..), AllocFrame(..)
     , GC(..), GCFrame(..)
     , Memory(..)
     , VTx(..), VTxState(..), TxW(..), VTxBatch(..)
@@ -27,7 +27,7 @@ module Database.VCache.Types
     , withByteStringVal
 
     , getVTxSpace, markForWrite, liftSTM
-    , mkVRefCache, cacheWeight, cacheModeBits, touchCache
+    , mkVRefCache, cacheModeBits, touchCache
     ) where
 
 import Data.Bits
@@ -154,17 +154,14 @@ data Cache a
 
 --
 -- cache bitfield for mode:
---   bit 0..4: heuristic weight, log scale
---     weight = bytes + 80 * (deps + 1)
+--   bit 0..4: weight, log scale
 --     log scale: 2^(N+6), max N=31
 --   bits 5..6: cache mode 0..3
 --   bit 7: toggle; set 1 by manager, 0 by derefc
 --
--- The weight is used for estimates of cache size, and at the moment
--- cache mode is the primary factor in deciding survival of an object
--- after the cache manager touches it. Higher bits might be used to 
--- estimate use and extend survival, but for now don't do anything.
---
+-- Weight is used to guide aggressiveness of the cache manager. 
+-- Currently, it just records the size of the encoded value, and
+-- does not account for expansion of values after parse. 
 
 
 -- | Cache modes are used when deciding, heuristically, whether to
@@ -210,10 +207,6 @@ mkVRefCache val !w !cm = Cached val cw where
     cw = m .|. cs 0 64
     cs r k = if ((k > w) || (r == 0x1f)) then r else cs (r+1) (k*2)
     m = cacheModeBits cm
-
-cacheWeight :: Int -> Int -> Int
-cacheWeight !nBytes !nDeps = nBytes + (80 * nDeps)
-{-# INLINE cacheWeight #-}
 
 -- | A PVar is a mutable variable backed by VCache. PVars can be read
 -- or updated transactionally (see VTx), and may store by reference
@@ -369,10 +362,13 @@ data Allocator = Allocator
     , alloc_frm_prev :: !AllocFrame -- frame N-1 (prev step)
     }
 
+-- a single allocation frame corresponds to new content written
+-- while the writer is busy in the background. 
 data AllocFrame = AllocFrame 
     { alloc_list :: !(Map Address ByteString)    -- recent allocations
-    , alloc_seek :: !(Map ByteString [Address])  -- recent allocations by name 
-    , alloc_init :: {-# UNPACK #-} !Address      -- alloc_new_addr at frame init.
+    , alloc_seek :: !(Map ByteString [Address])  -- vref content addressing 
+    , alloc_root :: ![(Address, ByteString)]     -- root PVars with path names
+    , alloc_init :: {-# UNPACK #-} !Address      -- next address at frame start.
     }
 
 allocFrameSearch :: (AllocFrame -> Maybe a) -> Allocator -> Maybe a
@@ -627,14 +623,11 @@ instance MonadPlus VGet where
 -- simple sequence of binary data and child VRefs. Also, to put then
 -- get a value must result in equivalent values. Further, values are
 -- Typeable to support memory caching of values loaded.
--- 
--- Under the hood, structured data is serialized as the pair:
---
---    (ByteString,[Either VRef PVar])
 --
 -- Developers must ensure that `get` on the serialization from `put` 
--- returns the same value. And `get` must be backwards compatible.
--- Developers should consider version wrappers, cf. SafeCopy package.
+-- returns the same value. And `get` should be backwards compatible
+-- to older versions of the same type. Consider version wrappers, 
+-- cf. SafeCopy package.
 -- 
 class (Typeable a) => VCacheable a where 
     -- | Serialize a value as a stream of bytes and value references. 

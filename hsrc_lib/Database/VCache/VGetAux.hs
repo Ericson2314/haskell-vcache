@@ -90,7 +90,6 @@ consuming n op = VGet $ \ s ->
     if (pConsuming > vget_limit s) then return (VGetE "not enough data") else 
     _vget op s 
 {-# RULES
-"consuming.consuming"   forall n1 n2 op . consuming n1 (consuming n2 op) = consuming (max n1 n2) op
 "consuming>>consuming"  forall n1 n2 f g . consuming n1 f >> consuming n2 g = consuming (n1+n2) (f>>g)
 "consuming>>=consuming" forall n1 n2 f g . consuming n1 f >>= consuming n2 . g = consuming (n1+n2) (f>>=g)
  #-}

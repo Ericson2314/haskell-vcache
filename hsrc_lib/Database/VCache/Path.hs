@@ -16,15 +16,12 @@ maxPathLen = 511  -- key size limit from LMDB 0.9.10
 -- developers can guard against namespace collisions. Each component
 -- may have its own persistent roots.
 -- 
--- While I call it a subdirectory, it really is just a prefix. Using
+-- While I call this a subdirectory, it really is just a prefix. Using
 -- "foo" followed by "bar" is equivalent to using "foobar". Developers
 -- should include their own separators if they expect them, i.e. "foo\/"
 -- and "bar\/".
 --
--- Paths are limited to ~500 bytes. For normal use, this limit will not
--- be a problem. If you're creating PVars based on runtime inputs, those
--- should always be dynamic PVars. Root PVar names should never be much 
--- larger than fully qualified function names.
+-- Total paths are limited to ~500 bytes. 
 --
 vcacheSubdir :: ByteString -> VCache -> VCache
 vcacheSubdir p (VCache vs d) = 

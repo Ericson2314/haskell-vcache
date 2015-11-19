@@ -199,7 +199,7 @@ findLastAddrAllocated txn dbiMemory = alloca $ \ pKey ->
 -- initialize memory based on initial allocation position
 initMemory :: Address -> Memory
 initMemory addr = m0 where
-    af = AllocFrame Map.empty Map.empty addr
+    af = AllocFrame Map.empty Map.empty [] addr
     ac = Allocator addr af af af
     gcf = GCFrame Map.empty
     gc = GC gcf gcf

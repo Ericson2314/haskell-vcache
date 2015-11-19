@@ -78,7 +78,7 @@ addr2vref !vc !addr =
 {-# INLINE addr2vref #-}
 
 addr2vref' :: (VCacheable a) => VSpace -> Address -> Memory -> IO (Memory, VRef a)
-addr2vref' !vc !addr !m = _addr2vref undefined vc addr m
+addr2vref' = _addr2vref undefined 
 {-# INLINE addr2vref' #-}
 
 -- Since I'm partitioning VRefs based on whether they're cached, I 
@@ -94,7 +94,6 @@ _addr2vref _dummy !vc !addr !m = do
             e <- mkVREph vc addr cache ty
             let m' = m { mem_vrefs = addVREph e (mem_vrefs m) }
             m' `seq` return (m', VRef addr cache vc ty get)
-{-# NOINLINE _addr2vref #-}
 
 mkVREph :: VSpace -> Address -> IORef (Cache a) -> TypeRep -> IO VREph
 mkVREph !vc !addr !cache !ty = 
@@ -113,7 +112,7 @@ loadVRefCache !addr !ty !em = mbrun _getVREphCache mbf where
 --
 -- There is no guarantee that this operation is timely. It may be called
 -- after the address is brought back into memory. So this function will
--- double check that it's still working with a 'dead' cache.
+-- double check that it's still working with a 'dead' ephemeron.
 clearVRef :: VSpace -> Address -> TypeRep -> IO ()
 clearVRef !vc !addr !ty = delFromCache >> delFromMem where
     delFromCache = modifyMVarMasked_ (vcache_cvrefs vc) delFrom
@@ -141,9 +140,10 @@ mbrun :: (Applicative m) => (a -> m (Maybe b)) -> Maybe a -> m (Maybe b)
 mbrun = maybe (pure Nothing) 
 {-# INLINE mbrun #-}
  
--- | Obtain a PVar given an address. PVar will lazily load when read.
--- This operation does not try to read the database. It may fail if
--- the requested address has already been loaded with another type.
+-- | Obtain a PVar given an address. PVar will lazily load when read,
+-- but otherwise remains in memory until released by the programmer.
+-- If the PVar is already in memory, the underlying TVar will be shared.
+-- (Or this operation will fail if the TypeRep is not identical.)
 addr2pvar :: (VCacheable a) => VSpace -> Address -> IO (PVar a)
 addr2pvar !vc !addr = 
     assert (isPVarAddr addr) $ 
@@ -151,8 +151,8 @@ addr2pvar !vc !addr =
     addr2pvar' vc addr
 {-# INLINE addr2pvar #-}
 
-addr2pvar' :: (VCacheable a) => VSpace -> Address -> Memory -> IO (Memory, PVar a) 
-addr2pvar' !vc !addr m = _addr2pvar undefined vc addr m
+addr2pvar' :: (VCacheable a) => VSpace -> Address -> Memory -> IO (Memory, PVar a)
+addr2pvar' = _addr2pvar undefined
 {-# INLINE addr2pvar' #-}
 
 _addr2pvar :: (VCacheable a) => a -> VSpace -> Address -> Memory -> IO (Memory, PVar a)
@@ -167,7 +167,7 @@ _addr2pvar _dummy !vc !addr m = do
             e <- mkPVEph vc addr var ty
             let m' = m { mem_pvars = addPVEph e (mem_pvars m) }
             m' `seq` return (m', PVar addr var vc ty put)
-{-# NOINLINE _addr2pvar #-}
+
 
 mkPVEph :: VSpace -> Address -> TVar (RDV a) -> TypeRep -> IO PVEph
 mkPVEph !vc !addr !tvar !ty = 
@@ -220,29 +220,24 @@ _getPVEphTVar = Weak.deRefWeak . _u where
 -- If cache exists, will touch existing cache as if dereferenced.
 newVRefIO :: (VCacheable a) => VSpace -> a -> CacheMode -> IO (VRef a)
 newVRefIO vc v cm = 
-    runVPutIO vc (put v) >>= \ ((), _data, _deps) ->
-    allocVRefIO vc _data _deps >>= \ vref ->
+    runVPutIO vc (put v) >>= \ ((), _data) ->
+    allocVRefIO vc _data >>= \ vref ->
     join $ atomicModifyIORef (vref_cache vref) $ \ c -> case c of
         Cached r bf ->
             let bf' = touchCache cm bf in
             let c' = Cached r bf' in
             (c', c' `seq` return vref)
         NotCached ->
-            let w = cacheWeight (BS.length _data) (L.length _deps) in
-            let c' = mkVRefCache v w cm in
+            let c' = mkVRefCache v (BS.length _data) cm in
             let op = initVRefCache vref >> return vref in
             (c', c' `seq` op)
 {-# NOINLINE newVRefIO #-}
 
--- Cached values should be represented in the vcache_cvrefs table to
--- support cache management (i.e. so the manager can focus on just 
--- the subset of cached values). The cache manager or GC may remove
--- objects from the vcache_cvrefs table.
+-- Add VREph to the vcache_cvrefs table for cache management.
 --
 -- I have an option here, to either create a new weak IORef for the
--- cache or to reuse the existing one. I'm choosing the latter for
--- now because I'm not sure how much a burden weak references add to
--- the GC.
+-- cache or to reuse the existing one. I'm choosing the latter because
+-- I imagine ephemerons to have a fair amount of overhead.
 initVRefCache :: VRef a -> IO ()
 initVRefCache !r = do
     let vc = vref_space r 
@@ -252,21 +247,16 @@ initVRefCache !r = do
         Just e -> modifyMVarMasked_ (vcache_cvrefs vc) $ return . addVREph e
 {-# INLINABLE initVRefCache #-}
 
--- | Construct a new VRef without initializing the cache.
+-- | Construct a new VRef without touching the cache. This allows the
+-- value to be removed from memory soon after construction.
 newVRefIO' :: (VCacheable a) => VSpace -> a -> IO (VRef a) 
-newVRefIO' !vc v =
-    runVPutIO vc (put v) >>= \ ((), _data, _deps) ->
-    allocVRefIO vc _data _deps 
+newVRefIO' !vc v = runVPutIO vc (put v) >>= allocVRefIO vc . snd
 {-# INLINE newVRefIO' #-}
 
--- | Allocate a VRef given data and dependencies.
---
--- We'll try to find an existing match in the database, then from the
--- recent allocations list, skipping addresses that have recently been
--- GC'd (to account for readers running a little behind the writer).
---
--- If a match is discovered, we'll use the existing address. Otherwise,
--- we'll allocate a new address and leave it to the background writer thread.
+-- | Allocate a VRef given its data. First, we'll try to find a match
+-- in the database. If there is none, we'll look for a match among the
+-- recent allocations. Only if no match is found will we prepare a new
+-- allocation.
 --
 allocVRefIO :: (VCacheable a) => VSpace -> ByteString -> IO (VRef a)
 allocVRefIO !vc !_data = 
@@ -279,22 +269,35 @@ allocVRefIO !vc !_data =
     case mbVRef of
         Just !vref -> return vref -- found matching VRef in database
         Nothing -> modifyMVarMasked (vcache_memory vc) $ \ m -> 
-            let okAddr addr = isVRefAddr addr && not (recentGC (mem_gc m) addr) in
-            let okData frm addr = maybe False ((==) _data . alloc_data) (Map.lookup addr (alloc_list frm)) in
-            let match frm addr = okAddr addr && okData frm addr in
-            let ff frm = Map.lookup _name (alloc_seek frm) >>= L.find (match frm) in 
-            case allocFrameSearch ff (mem_alloc m) of
-                Just addr -> addr2vref' vc addr m -- found among recent allocations
-                Nothing -> do -- allocate a new VRef address
+            case findRecentVRef _name _data m of
+                Just addr -> addr2vref' vc addr m
+                Nothing -> do -- allocate new vref
                     let ac = mem_alloc m
                     let addr = alloc_new_addr ac
-                    let an = Allocation { alloc_name = _name, alloc_data = _data, alloc_addr = addr }
-                    let frm' = addToFrame an (alloc_frm_next ac) 
-                    let ac' = ac { alloc_new_addr = 2 + addr, alloc_frm_next = frm' }
+                    let frm' = addVRefAlloc addr _name _data (alloc_frm_next ac)
+                    let addr' = 2 + (alloc_new_addr ac) 
+                    let ac' = ac { alloc_new_addr = addr', alloc_frm_next = frm' }
                     let m' = m { mem_alloc = ac' }
                     signalAlloc vc
                     addr2vref' vc addr m'
-{-# NOINLINE allocVRefIO #-}
+
+-- add new VRef to next allocation frame.
+addVRefAlloc :: Address -> ByteString -> ByteString -> AllocFrame -> AllocFrame
+addVRefAlloc addr _name _data (AllocFrame l s r i) =
+    let ul = Map.insert addr _data in
+    let insAddr = Just . (:) addr . fromMaybe [] in
+    let us = Map.alter insAddr _name in
+    AllocFrame (ul l) (us s) r i
+
+-- Find recently allocated VRef with a matching data, if one exists.
+-- This will also filter out addresses that are recently GC'd.
+findRecentVRef :: ByteString -> ByteString -> Memory -> Maybe Address
+findRecentVRef _name _data m = allocFrameSearch ff (mem_alloc m) where
+    ff frm = Map.lookup _name (alloc_seek frm) >>= L.find (match frm)
+    match frm addr = isVRef && dataMatch && available where
+        isVRef = isVRefAddr addr
+        dataMatch = maybe False (== _data) (Map.lookup addr (alloc_list frm))
+        available = not $ recentGC (mem_gc m) addr
 
 -- list all values associated with a given key
 listDups' :: MDB_txn -> MDB_dbi' -> MDB_val -> IO [MDB_val]
@@ -341,18 +344,6 @@ candidateVRefInDB vc txn vData vCandidateAddr = do
                 return (m', Just vref)
 
 
--- add annotation to frame without seek
-addToFrame :: Allocation -> AllocFrame -> AllocFrame
-addToFrame an frm 
- | BS.null (alloc_name an) = -- anonymous PVars 
-    assert (isPVarAddr (alloc_addr an)) $
-    let list' = Map.insert (alloc_addr an) an (alloc_list frm) in
-    frm { alloc_list = list' }
- | otherwise = -- root PVars or hashed VRefs 
-    let list' = Map.insert (alloc_addr an) an (alloc_list frm) in
-    let add_an = Just . (an:) . maybe [] id in
-    let seek' = Map.alter add_an (alloc_name an) (alloc_seek frm) in
-    frm { alloc_list = list', alloc_seek = seek' }
 
 peekAddr :: MDB_val -> IO Address
 peekAddr v =
@@ -369,9 +360,6 @@ seek f (x:xs) = f x >>= continue where
     continue Nothing = seek f xs
     continue r@(Just _) = return r 
 
-
-
-
 -- Intermediate data to allocate a new PVar. We don't know the
 -- address yet, but we do know every other relevant aspect of
 -- this PVar.
@@ -383,8 +371,8 @@ data AllocPVar a = AllocPVar
 
 -- | Create a new, anonymous PVar as part of an active transaction.
 -- Contents of the new PVar are not serialized unless the transaction
--- commits (though a placeholder may be allocated if the PVar remains
--- in memory during a write frame).  
+-- commits, though a placeholder may be allocated if the PVar remains
+-- in memory during a write frame.
 newPVar :: (VCacheable a) => a -> VTx (PVar a)
 newPVar x = do
     vc <- getVTxSpace
@@ -467,28 +455,31 @@ _allocPVar _dummy !vc !apv !m = do
     let ty = typeOf _dummy
     let tvar = alloc_pvar_tvar apv
     let ac = mem_alloc m
-    let pv_addr = 1 + (alloc_new_addr ac)
-    let pvar = PVar pv_addr tvar vc ty put
-    pveph <- mkPVEph vc pv_addr tvar ty
-    let an  = Allocation
-            { alloc_name = alloc_pvar_name apv
-            , alloc_data = alloc_pvar_data apv
-            , alloc_addr = pv_addr
-            }
-    let frm' = addToFrame an (alloc_frm_next ac)
-    let addr' = 2 + alloc_new_addr ac
-    let ac' = ac { alloc_new_addr = addr', alloc_frm_next = frm' }
+    let addr = 1 + (alloc_new_addr ac)
+    pveph <- mkPVEph vc addr tvar ty
+    let pvar = PVar addr tvar vc ty put
+    let _name = alloc_pvar_name apv 
+    let _data = alloc_pvar_data apv
+    let frm' = addPVarAlloc addr _name _data (alloc_frm_next ac)
     let pvars' = addPVEph pveph (mem_pvars m)
+    let addr' = 2 + (alloc_new_addr ac)
+    let ac' = ac { alloc_new_addr = addr', alloc_frm_next = frm' }
     let m' = m { mem_pvars = pvars', mem_alloc = ac' }
     return (m', pvar)
-{-# NOINLINE _allocPVar #-}
+
+-- add new PVar to next allocation frame
+addPVarAlloc :: Address -> ByteString -> ByteString -> AllocFrame -> AllocFrame
+addPVarAlloc addr _name _data (AllocFrame l s r i) =
+    let ul = Map.insert addr _data in
+    let ur = if BS.null _name then id else (:) (addr,_name) in
+    AllocFrame (ul l) s (ur r) i
 
 -- | Global, persistent variables may be loaded by name. The name here
 -- is prefixed by vcacheSubdir to control namespace collisions between
 -- software components. These named variables are roots for GC purposes,
 -- and will not be deleted.
 --
--- Conceptually, the root PVar has always been there. Loading a root
+-- Conceptually, a root PVar has always been there. Loading a root
 -- is thus a pure computation. At the very least, it's an idempotent
 -- operation. If the PVar exists, its value is lazily read from the
 -- persistence layer. Otherwise, the given initial value is stored.
@@ -515,19 +506,20 @@ loadRootPVarIO vc !name ini =
             let path = vcache_path vc `BS.append` name in
             fail $  "VCache: root PVar path too long: " ++ show path
 
+-- find the PVar by name in the database or recent allocations. If
+-- not in those locations, go ahead and construct it new.
 _loadRootPVarIO :: (VCacheable a) => VSpace -> ByteString -> a -> IO (PVar a)
 _loadRootPVarIO vc !_name ini = withRdOnlyTxn vc $ \ txn ->
     withByteStringVal _name $ \ rootKey ->
     mdb_get' txn (vcache_db_vroots vc) rootKey >>= \ mbRoot ->
     case mbRoot of
         Just val -> peekAddr val >>= addr2pvar vc -- found root in database
-        Nothing -> -- usually allocate new PVar, possibly find in recent allocations
-            preAllocPVarIO vc _name ini >>= \ apv -> -- for common case...
+        Nothing -> -- allocate new PVar or find in recent allocations
+            preAllocPVarIO vc _name ini >>= \ apv -> -- common case is new var
             modifyMVarMasked (vcache_memory vc) $ \ m ->
-                let match an = isPVarAddr (alloc_addr an) in
-                let ff frm = Map.lookup _name (alloc_seek frm) >>= L.find match in
+                let ff = L.find ((== _name) . snd) . alloc_root in
                 case allocFrameSearch ff (mem_alloc m) of
-                    Just an -> addr2pvar' vc (alloc_addr an) m -- recent allocation
+                    Just rn -> addr2pvar' vc (fst rn) m -- recent allocation
                     Nothing -> signalAlloc vc >> allocPVar vc apv m -- new root PVar
 {-# NOINLINE _loadRootPVarIO #-}
  
