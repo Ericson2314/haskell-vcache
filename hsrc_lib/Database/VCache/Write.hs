@@ -94,9 +94,10 @@ writeStep vc = withRWLock (vcache_rwlock vc) $ do
     unless bUpdGCSep (fail "VCache bug: overlapping GC and update targets")
     (UpdateNotes rcDiff hsDel) <- updateVirtualMemory vc txn allocInit fb
 
-    -- Update reference counts, +1 for newly named roots.
-    let lNewRoots = fmap fst (alloc_root afrm) 
-    let rcUpd = addRefcts lNewRoots rcDiff
+    -- Update reference counts. zeroes for new allocations. +1 for roots.
+    let lRoots = fmap fst (alloc_root afrm)
+    let rcAlloc = addRefcts lRoots $ fmap (const 0) (alloc_list afrm)
+    let rcUpd = Map.unionWith (+) rcDiff rcAlloc
     updateReferenceCounts vc txn allocInit rcUpd
 
     -- Update VRef hashes 
