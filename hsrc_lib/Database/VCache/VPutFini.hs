@@ -43,12 +43,14 @@ vputFini = do
     putVarNatR (szFini - szStart)
     -- shrinkBuffer? no need, should GC soon.
 
--- putChildren is already a stack (last in first out), so we'll just
--- write them in order. Later, when we read our bytestring, we'll compute
--- a new stack in reverse order from the order we wrote them here, which
--- is optimal for reading.
+-- putChildren receives a stack (last in first out), so we'll just
+-- write them in order. Our first address is written as a natural
+-- number, then each following address is written as a difference.
+-- In most cases, this should reduce the encoding overhead.
 putChildren :: [Address] -> VPut ()
-putChildren = go 0 where
+putChildren = ini where
+    ini [] = return ()
+    ini (x:xs) = putVarNat (fromIntegral x) >> go x xs 
     go _ [] = return ()
     go p (x:xs) = 
         let offset = (fromIntegral x) - (fromIntegral p) in

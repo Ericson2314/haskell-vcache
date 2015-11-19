@@ -18,4 +18,5 @@
  * fix a severe buffer resize bug for allocating large VCache nodes
 * **0.2.7**
  * allow release of VRefs and PVars before writes 
+* **0.2.8** (TODO)
  * nursery GC to eliminate unnecessary writes
