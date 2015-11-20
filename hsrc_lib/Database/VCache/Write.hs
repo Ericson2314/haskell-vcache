@@ -21,17 +21,23 @@
 -- transactions.
 --
 -- KNOWN BUGS: 
---   0.2.7 with the changes, I can get an undefined refct.
---     Namely, when reallocating existing nodes. There might
---     be a problem with revival.
+--   0.2.7 with the changes, I can get an undefined refct on objects
+--     that I probably GC'd earlier in the same frame. This wasn't an
+--     issue in 0.2.6 because I held VRef and PVar dependencies until
+--     after the write frame so GC would be prevented by mem_vrefs and
+--     mem_pvars. In 0.2.7 this is no longer the case.
 --
---     Example: 
---          db <- openVCache 1000 "db"
---          r = vref' vc 
---          r1 = r.r.r.r
---          r2 = r1.r1.r1.r1
---          construct r2 on the same value a few times
+--     I need to prevent GC of dependencies of the current frame.
 --
+--     Since I already plan to be computing a dependency set for nursery
+--     collection, I can probably benefit from using a more 'complete'
+--     dependency set to preserve older dependencies instead of just
+--     new allocations. I could potentially precompute reference count
+--     increases with the same effort. Then I must add an extra constraint:
+--     can't GC content in mem_vrefs, mem_pvars, or rcNew.
+--     
+--     I could then skip reading newDeps in the updater.
+--     
 -- 
 -- 
 module Database.VCache.Write
@@ -90,7 +96,8 @@ writeStep vc = withRWLock (vcache_rwlock vc) $ do
     -- prepare update batch (allocations, writes)
     (Writes wlog wsync) <- atomically (takeWrites (vcache_writes vc))
     pvb <- seralizeWrites vc wlog -- PVar states as bytestrings
-    Mem.performMinorGC -- nursery GC at Haskell layer
+    Mem.performMinorGC -- nursery GC of Haskell memory
+
     afrm <- allocFrameStep vc
     let allocInit = alloc_init afrm
     let ub = Map.union pvb (alloc_list afrm)
