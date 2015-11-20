@@ -19,6 +19,20 @@
 -- structure sharing feature and deleting VRef addresses with zero
 -- references. GC is incremental to avoid latency spikes with durable
 -- transactions.
+--
+-- KNOWN BUGS: 
+--   0.2.7 with the changes, I can get an undefined refct.
+--     Namely, when reallocating existing nodes. There might
+--     be a problem with revival.
+--
+--     Example: 
+--          db <- openVCache 1000 "db"
+--          r = vref' vc 
+--          r1 = r.r.r.r
+--          r2 = r1.r1.r1.r1
+--          construct r2 on the same value a few times
+--
+-- 
 -- 
 module Database.VCache.Write
     ( writeStep
