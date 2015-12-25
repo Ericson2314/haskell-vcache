@@ -1,4 +1,3 @@
-
 -- | read-write lock specialized for using LMDB with MDB_NOLOCK option
 --
 module Database.VCache.RWLock
@@ -21,20 +20,20 @@ import qualified Data.IntSet as IntSet
 -- want to deal with the whole issue of OS bound threads or a limit on
 -- number of concurrent readers. Without locks, we essentially have one
 -- valid snapshot. The writer can begin dismantling earlier snapshots
--- as needed to allocate pages. 
+-- as needed to allocate pages.
 --
 -- RWLock essentially enforces this sort of frame-buffer concurrency.
-data RWLock = RWLock 
+data RWLock = RWLock
     { rwlock_frames :: !(MVar FB)
     , rwlock_writer :: !(MVar ())  -- enforce single writer
     }
 
 data FB = FB !F !F
 type F = IORef Frame
-data Frame = Frame 
+data Frame = Frame
     { frame_reader_next :: {-# UNPACK #-} !Int
     , frame_readers     :: !IntSet
-    , frame_onClear     :: ![IO ()] -- actions to perform 
+    , frame_onClear     :: ![IO ()] -- actions to perform
     }
 frame0 :: Frame
 frame0 = Frame 1 IntSet.empty []
@@ -43,7 +42,7 @@ newRWLock :: IO RWLock
 newRWLock = liftM2 RWLock (newMVar =<< newF2) newEmptyMVar where
 
 newF2 :: IO FB
-newF2 = liftM2 FB newF newF 
+newF2 = liftM2 FB newF newF
 
 newF :: IO F
 newF = newIORef frame0
@@ -55,10 +54,10 @@ withWriterMutex l = bracket_ getLock dropLock where
 {-# INLINE withWriterMutex #-}
 
 -- | Grab the current read-write lock for the duration of
--- an underlying action. This may wait on older readers. 
+-- an underlying action. This may wait on older readers.
 withRWLock :: RWLock -> IO a -> IO a
 withRWLock l action = withWriterMutex l $ do
-    oldFrame <- rotateReaderFrames l 
+    oldFrame <- rotateReaderFrames l
     mvWait <- newEmptyMVar
     onFrameCleared oldFrame (putMVar mvWait ())
     takeMVar mvWait
@@ -77,9 +76,9 @@ rotateReaderFrames l = mask_ $ do
 --
 -- NOTE: Each of these 'frames' actually contains readers of two
 -- transactions. Alignment between LMDB transactions and VCache
--- RWLock isn't exact. 
+-- RWLock isn't exact.
 --
--- Each write lock will rotate reader frames just once: 
+-- Each write lock will rotate reader frames just once:
 --
 --     (f1,f2) → (f0,f1) returning f2
 --
@@ -89,19 +88,19 @@ rotateReaderFrames l = mask_ $ do
 -- f1 will have readers for frame N-2 and some for N-1.
 -- f2 will have readers for frame N-3 and some for N-2.
 --
--- LMDB guarantees that the data pages for frames N-1 and N-2 are 
+-- LMDB guarantees that the data pages for frames N-1 and N-2 are
 -- intact. However, frame N-3 will be dismantled while building
--- frame N. Thus, we must wait for f2 readers to finish before we 
+-- frame N. Thus, we must wait for f2 readers to finish before we
 -- begin the writer N transaction.
 --
 -- If we assume short-running readers and long-running writers, it
--- is rare that the writer ever needs to wait on readers. Readers 
+-- is rare that the writer ever needs to wait on readers. Readers
 -- never need to wait on the writer. This assumption is achieved by
 -- batching writes  in VCache.
 --
 
 
--- perform some action when a frame is cleared 
+-- perform some action when a frame is cleared
 -- performs immediately, if possible.
 onFrameCleared :: F -> IO () -> IO ()
 onFrameCleared f action = atomicModifyIORef f addAction >>= id where
@@ -112,7 +111,7 @@ onFrameCleared f action = atomicModifyIORef f addAction >>= id where
         let frame' = frame { frame_onClear = onClear' } in
         (frame', return ())
 
--- | Grab a read-only lock for the duration of some IO action. 
+-- | Grab a read-only lock for the duration of some IO action.
 --
 -- Readers never need to wait on the writer.
 withRdOnlyLock :: RWLock -> IO a -> IO a
@@ -143,4 +142,4 @@ delReader f r = atomicModifyIORef f del >>= sequence_ where
         let rdrs' = IntSet.delete r (frame_readers frm) in
         if IntSet.null rdrs' then (frame0, frame_onClear frm) else
         let frm' = frm { frame_readers = rdrs' } in
-        (frm', []) 
+        (frm', [])

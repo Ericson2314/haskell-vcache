@@ -1,6 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
 -- This module mostly exists to avoid cyclic dependencies
-module Database.VCache.VGetAux 
+module Database.VCache.VGetAux
     ( getWord8FromEnd
     , getWord8
     , isEmpty, vgetStateEmpty
@@ -19,7 +19,7 @@ import Foreign.Storable
 import Database.VCache.Types
 
 -- | Read one byte of data, or fail if not enough data.
-getWord8 :: VGet Word8 
+getWord8 :: VGet Word8
 getWord8 = consuming 1 $ VGet $ \ s -> do
     let p = vget_target s
     r <- peekByte p
@@ -54,7 +54,7 @@ vgetStateEmpty s = (vget_target s == vget_limit s)
 {-# INLINE vgetStateEmpty #-}
 
 -- | Get an integer represented in the Google protocol buffers zigzag
--- 'varint' encoding, e.g. as produced by 'putVarInt'. 
+-- 'varint' encoding, e.g. as produced by 'putVarInt'.
 getVarInt :: VGet Integer
 getVarInt = unZigZag <$> getVarNat
 {-# INLINE getVarInt #-}
@@ -87,11 +87,10 @@ getVarNat' !n =
 consuming :: Int -> VGet a -> VGet a
 consuming n op = VGet $ \ s ->
     let pConsuming = vget_target s `plusPtr` n in
-    if (pConsuming > vget_limit s) then return (VGetE "not enough data") else 
-    _vget op s 
+    if (pConsuming > vget_limit s) then return (VGetE "not enough data") else
+    _vget op s
 {-# RULES
 "consuming>>consuming"  forall n1 n2 f g . consuming n1 f >> consuming n2 g = consuming (n1+n2) (f>>g)
 "consuming>>=consuming" forall n1 n2 f g . consuming n1 f >>= consuming n2 . g = consuming (n1+n2) (f>>=g)
  #-}
 {-# INLINABLE consuming #-}
-

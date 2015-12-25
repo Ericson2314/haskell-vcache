@@ -1,6 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
 
-module Database.VCache.VGet 
+module Database.VCache.VGet
     ( VGet
 
     -- * Prim Readers
@@ -45,12 +45,12 @@ import qualified Data.ByteString.Lazy as LBS
 import Database.VCache.Types
 import Database.VCache.Aligned
 import Database.VCache.Alloc
-import Database.VCache.VGetAux 
+import Database.VCache.VGetAux
 
 -- | isolate a parser to a subset of bytes and value references. The
--- child parser must process its entire input (all bytes and values) 
--- or will fail. If there is not enough available input to isolate, 
--- this operation will fail. 
+-- child parser must process its entire input (all bytes and values)
+-- or will fail. If there is not enough available input to isolate,
+-- this operation will fail.
 --
 --      isolate nBytes nVRefs operation
 --
@@ -60,7 +60,7 @@ isolate nBytes nRefs op = VGet $ \ s ->
     if (pF > vget_limit s) then return (VGetE "isolate: not enough data") else
     case takeExact nRefs (vget_children s) of
         Nothing -> return (VGetE "isolate: not enough children")
-        Just (cs,cs') -> 
+        Just (cs,cs') ->
             let s_isolated = s { vget_children = cs
                                , vget_limit  = pF
                                }
@@ -78,7 +78,7 @@ isolate nBytes nRefs op = VGet $ \ s ->
 
 -- take exactly the requested amount from a list, or return Nothing.
 takeExact :: Int -> [a] -> Maybe ([a],[a])
-takeExact = takeExact' [] 
+takeExact = takeExact' []
 {-# INLINE takeExact #-}
 
 takeExact' :: [a] -> Int -> [a] -> Maybe ([a],[a])
@@ -88,12 +88,12 @@ takeExact' _ _ _ = Nothing
 
 -- | Load a VRef, just the reference rather than the content. User must
 -- know the type of the value, since getVRef is essentially a typecast.
--- VRef content is not read until deref. 
+-- VRef content is not read until deref.
 --
 -- All instances of a VRef with the same type and address will share the
 -- same cache.
 getVRef :: (VCacheable a) => VGet (VRef a)
-getVRef = VGet $ \ s -> 
+getVRef = VGet $ \ s ->
     case (vget_children s) of
         (c:cs) | isVRefAddr c -> do
             let s' = s { vget_children = cs }
@@ -104,14 +104,14 @@ getVRef = VGet $ \ s ->
 
 -- | Load a PVar, just the variable. Content is loaded lazily on first
 -- read, then kept in memory until the PVar is GC'd. Unlike other Haskell
--- variables, PVars can be serialized to the VCache address space. All 
+-- variables, PVars can be serialized to the VCache address space. All
 -- PVars for a specific address are collapsed, using the same TVar.
 --
 -- Developers must know the type of the PVar, since getPVar will cast to
 -- any cacheable type. A runtime error is raised only if you attempt to
 -- load the same PVar address with two different types.
 --
-getPVar :: (VCacheable a) => VGet (PVar a) 
+getPVar :: (VCacheable a) => VGet (PVar a)
 getPVar = VGet $ \ s ->
     case (vget_children s) of
         (c:cs) | isPVarAddr c -> do
@@ -123,7 +123,7 @@ getPVar = VGet $ \ s ->
 
 -- | Obtain the VSpace associated with content being read. Does not
 -- consume any data.
-getVSpace :: VGet VSpace 
+getVSpace :: VGet VSpace
 getVSpace = VGet $ \ s -> return (VGetR (vget_space s) s)
 {-# INLINE getVSpace #-}
 
@@ -173,7 +173,7 @@ getWord64le = consuming 8 $ VGet $ \ s -> do
             (fromIntegral b3 `shiftL` 24) .|.
             (fromIntegral b2 `shiftL` 16) .|.
             (fromIntegral b1 `shiftL`  8) .|.
-            (fromIntegral b0            )    
+            (fromIntegral b0            )
     let s' = s { vget_target = p `plusPtr` 8 }
     return (VGetR r s')
 {-# INLINE getWord64le #-}
@@ -219,7 +219,7 @@ getWord64be = consuming 8 $ VGet $ \ s -> do
             (fromIntegral b4 `shiftL` 24) .|.
             (fromIntegral b5 `shiftL` 16) .|.
             (fromIntegral b6 `shiftL`  8) .|.
-            (fromIntegral b7            )    
+            (fromIntegral b7            )
     let s' = s { vget_target = p `plusPtr` 8 }
     return (VGetR r s')
 {-# INLINE getWord64be #-}
@@ -258,12 +258,12 @@ getByteStringLazy n = LBS.fromStrict <$> getByteString n
 {-# INLINE getByteStringLazy #-}
 
 -- | Access a given number of bytes without copying them. These bytes
--- are read-only, and are considered to be consumed upon returning. 
+-- are read-only, and are considered to be consumed upon returning.
 -- The pointer should be considered invalid after returning from the
 -- withBytes computation.
 withBytes :: Int -> (Ptr Word8 -> IO a) -> VGet a
 withBytes n action = consuming n $ VGet $ \ s -> do
-    let pTgt = vget_target s  
+    let pTgt = vget_target s
     let s' = s { vget_target = pTgt `plusPtr` n }
     a <- action pTgt
     return (VGetR a s')
@@ -271,7 +271,7 @@ withBytes n action = consuming n $ VGet $ \ s -> do
 -- | Get a character from UTF-8 format. Assumes a valid encoding.
 -- (In case of invalid encoding, arbitrary characters may be returned.)
 getc :: VGet Char
-getc = 
+getc =
     _c0 >>= \ b0 ->
     if (b0 < 0x80) then return $! chr b0 else
     if (b0 < 0xe0) then _getc2 (b0 `xor` 0xc0) else
@@ -314,7 +314,7 @@ label sf op = VGet $ \ s ->
 -- | lookAhead will parse a value, but not consume any input.
 lookAhead :: VGet a -> VGet a
 lookAhead op = VGet $ \ s ->
-    _vget op s >>= \ result -> 
+    _vget op s >>= \ result ->
     return $
     case result of
         VGetR r _ -> VGetR r s
@@ -323,7 +323,7 @@ lookAhead op = VGet $ \ s ->
 -- | lookAheadM will consume input only if it returns `Just a`.
 lookAheadM :: VGet (Maybe a) -> VGet (Maybe a)
 lookAheadM op = VGet $ \ s ->
-    _vget op s >>= \ result -> 
+    _vget op s >>= \ result ->
     return $
     case result of
         VGetR Nothing _ -> VGetR Nothing s
@@ -337,4 +337,3 @@ lookAheadE op = VGet $ \ s ->
     case result of
         VGetR l@(Left _) _ -> VGetR l s
         other -> other
-

@@ -19,7 +19,7 @@ import Database.VCache.Types
 import Database.VCache.VPutAux
 
 -- | When we're just about done with VPut, we really have one more
--- task to perform: to output the address list for any contained 
+-- task to perform: to output the address list for any contained
 -- PVars and VRefs. These addresses are simply concatenated onto the
 -- normal byte output, with a final size value (not including itself)
 -- to indicate how far to jump back.
@@ -50,9 +50,9 @@ vputFini = do
 putChildren :: [Address] -> VPut ()
 putChildren = ini where
     ini [] = return ()
-    ini (x:xs) = putVarNat (fromIntegral x) >> go x xs 
+    ini (x:xs) = putVarNat (fromIntegral x) >> go x xs
     go _ [] = return ()
-    go p (x:xs) = 
+    go p (x:xs) =
         let offset = (fromIntegral x) - (fromIntegral p) in
         putVarInt offset >> go x xs
 
@@ -82,4 +82,3 @@ runVPutIO vs action = do
 
 runVPut :: VSpace -> VPut a -> (a, ByteString)
 runVPut vs action = unsafePerformIO (runVPutIO vs action)
-

@@ -1,6 +1,3 @@
-
-
-
 module Database.VCache.VPut
     ( VPut
 
@@ -46,12 +43,12 @@ import Database.VCache.VPutAux
 putVRef :: VRef a -> VPut ()
 putVRef ref = VPut $ \ s ->
     if (vput_space s == vref_space ref) then _putVRef s ref else
-    fail $ "putVRef argument is not from destination VCache" 
+    fail $ "putVRef argument is not from destination VCache"
 {-# INLINABLE putVRef #-}
 
 -- assuming destination and ref have same address space
 _putVRef :: VPutS -> VRef a -> IO (VPutR ())
-_putVRef s ref = 
+_putVRef s ref =
     let cs = vput_children s in
     let c  = vref_addr ref in
     c `seq` -- don't hold onto vref
@@ -63,13 +60,13 @@ _putVRef s ref =
 -- and address space.
 putPVar :: PVar a -> VPut ()
 putPVar pvar = VPut $ \ s ->
-    if (vput_space s == pvar_space pvar) then _putPVar s pvar else 
+    if (vput_space s == pvar_space pvar) then _putPVar s pvar else
     fail $ "putPVar argument is not from destination VCache"
 {-# INLINABLE putPVar #-}
 
 -- assuming destination and var have same address space
 _putPVar :: VPutS -> PVar a -> IO (VPutR ())
-_putPVar s pvar = 
+_putPVar s pvar =
     let cs = vput_children s in
     let c = pvar_addr pvar in
     c `seq` -- don't hold onto pvar
@@ -87,7 +84,7 @@ putVSpace vc = VPut $ \ s ->
 
 -- | Put a Word in little-endian or big-endian form.
 --
--- Note: These are mostly included because they're part of the 
+-- Note: These are mostly included because they're part of the
 -- Data.Binary and Data.Cereal APIs. They may be useful in some
 -- cases, but putVarInt will frequently be preferable.
 putWord16le, putWord16be :: Word16 -> VPut ()
@@ -172,12 +169,12 @@ putWord64be w = reserving 8 $ VPut $ \ s -> do
 -- usually be valid when loaded later. Also, the storable type
 -- shouldn't have any gaps (unassigned bytes); uninitialized
 -- bytes may interfere with structure sharing in VCache.
-putStorable :: (Storable a) => a -> VPut () 
-putStorable a = 
+putStorable :: (Storable a) => a -> VPut ()
+putStorable a =
     let n = sizeOf a in
     reserving n $ VPut $ \ s -> do
-        let pTgt = vput_target s 
-        let s' = s { vput_target = (pTgt `plusPtr` n) } 
+        let pTgt = vput_target s
+        let s' = s { vput_target = (pTgt `plusPtr` n) }
         pokeAligned (castPtr pTgt) a
         return (VPutR () s')
 {-# INLINABLE putStorable #-}
@@ -197,7 +194,7 @@ putByteStringLazy s = reserving (fromIntegral $ LBS.length s) (mapM_ _putByteStr
 -- put a byte string, assuming enough space has been reserved already.
 -- this uses a simple memcpy to the target space.
 _putByteString :: BS.ByteString -> VPut ()
-_putByteString (BSI.PS fpSrc p_off p_len) = 
+_putByteString (BSI.PS fpSrc p_off p_len) =
     VPut $ \ s -> withForeignPtr fpSrc $ \ pSrc -> do
         let pDst = vput_target s
         copyBytes pDst (pSrc `plusPtr` p_off) p_len
@@ -210,7 +207,7 @@ putc :: Char -> VPut ()
 putc a | c <= 0x7f      = putWord8 (fromIntegral c)
        | c <= 0x7ff     = reserving 2 $ VPut $ \ s -> do
                             let p  = vput_target s
-                            let s' = s { vput_target = (p `plusPtr` 2) } 
+                            let s' = s { vput_target = (p `plusPtr` 2) }
                             poke (p            ) (0xc0 .|. y)
                             poke (p `plusPtr` 1) (0x80 .|. z)
                             return (VPutR () s')
@@ -230,7 +227,7 @@ putc a | c <= 0x7f      = putWord8 (fromIntegral c)
                             poke (p `plusPtr` 3) (0x80 .|. z)
                             return (VPutR () s')
         | otherwise     = fail "not a valid character" -- shouldn't happen
-    where 
+    where
         c = ord a
         z, y, x, w :: Word8
         z = fromIntegral (c           .&. 0x3f)
@@ -243,4 +240,3 @@ putc a | c <= 0x7f      = putWord8 (fromIntegral c)
 peekChildCount :: VPut Int
 peekChildCount = L.length <$> peekChildren
 {-# INLINE peekChildCount #-}
-

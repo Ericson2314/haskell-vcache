@@ -16,7 +16,7 @@
 -- in-memory tables. Since the LMDB layer is also limited by a single
 -- writer, I think this lock shouldn't become a major bottleneck. But
 -- it may require more context switching than desirable.
--- 
+--
 module Database.VCache.Alloc
     ( addr2vref
     , addr2pvar
@@ -50,7 +50,7 @@ import Foreign.Marshal.Alloc
 
 import GHC.Conc (unsafeIOToSTM)
 import Control.Concurrent.MVar
-import Control.Concurrent.STM.TVar 
+import Control.Concurrent.STM.TVar
 
 import System.Mem.Weak (Weak)
 import qualified System.Mem.Weak as Weak
@@ -71,21 +71,21 @@ import Database.VCache.Read
 -- given address is valid.
 --
 addr2vref :: (VCacheable a) => VSpace -> Address -> IO (VRef a)
-addr2vref !vc !addr = 
-    assert (isVRefAddr addr) $ 
-    modifyMVarMasked (vcache_memory vc) $ 
+addr2vref !vc !addr =
+    assert (isVRefAddr addr) $
+    modifyMVarMasked (vcache_memory vc) $
     addr2vref' vc addr
 {-# INLINE addr2vref #-}
 
 addr2vref' :: (VCacheable a) => VSpace -> Address -> Memory -> IO (Memory, VRef a)
-addr2vref' = _addr2vref undefined 
+addr2vref' = _addr2vref undefined
 {-# INLINE addr2vref' #-}
 
--- Since I'm partitioning VRefs based on whether they're cached, I 
--- must search two maps to see whether the VRef is already in memory. 
+-- Since I'm partitioning VRefs based on whether they're cached, I
+-- must search two maps to see whether the VRef is already in memory.
 _addr2vref :: (VCacheable a) => a -> VSpace -> Address -> Memory -> IO (Memory, VRef a)
 _addr2vref _dummy !vc !addr !m = do
-    let ty = typeOf _dummy 
+    let ty = typeOf _dummy
     mbCache <- loadVRefCache addr ty (mem_vrefs m)
     case mbCache of
         Just cache -> return (m, VRef addr cache vc ty get)
@@ -96,7 +96,7 @@ _addr2vref _dummy !vc !addr !m = do
             m' `seq` return (m', VRef addr cache vc ty get)
 
 mkVREph :: VSpace -> Address -> IORef (Cache a) -> TypeRep -> IO VREph
-mkVREph !vc !addr !cache !ty = 
+mkVREph !vc !addr !cache !ty =
     mkWeakIORef cache (clearVRef vc addr ty) >>= \ wkCache ->
     return $! VREph addr ty wkCache
 {-# INLINE mkVREph #-}
@@ -108,7 +108,7 @@ loadVRefCache !addr !ty !em = mbrun _getVREphCache mbf where
 
 -- When a VRef is GC'd from the Haskell layer, it must be deleted from
 -- the ephemeron table. And deleting it from the cache will also help
--- the cache manager maintain a valid estimate of cache size.  
+-- the cache manager maintain a valid estimate of cache size.
 --
 -- There is no guarantee that this operation is timely. It may be called
 -- after the address is brought back into memory. So this function will
@@ -131,23 +131,23 @@ clearVRef !vc !addr !ty = delFromCache >> delFromMem where
 _getVREphCache :: VREph -> IO (Maybe (IORef (Cache a)))
 _getVREphCache = Weak.deRefWeak . _u where
     _u :: VREph -> Weak (IORef (Cache a))
-    _u (VREph { vreph_cache = w }) = _c w 
+    _u (VREph { vreph_cache = w }) = _c w
     _c :: Weak (IORef (Cache b)) -> Weak (IORef (Cache a))
     _c = unsafeCoerce
 {-# INLINE _getVREphCache #-}
 
 mbrun :: (Applicative m) => (a -> m (Maybe b)) -> Maybe a -> m (Maybe b)
-mbrun = maybe (pure Nothing) 
+mbrun = maybe (pure Nothing)
 {-# INLINE mbrun #-}
- 
+
 -- | Obtain a PVar given an address. PVar will lazily load when read,
 -- but otherwise remains in memory until released by the programmer.
 -- If the PVar is already in memory, the underlying TVar will be shared.
 -- (Or this operation will fail if the TypeRep is not identical.)
 addr2pvar :: (VCacheable a) => VSpace -> Address -> IO (PVar a)
-addr2pvar !vc !addr = 
-    assert (isPVarAddr addr) $ 
-    modifyMVarMasked (vcache_memory vc) $ 
+addr2pvar !vc !addr =
+    assert (isPVarAddr addr) $
+    modifyMVarMasked (vcache_memory vc) $
     addr2pvar' vc addr
 {-# INLINE addr2pvar #-}
 
@@ -170,7 +170,7 @@ _addr2pvar _dummy !vc !addr m = do
 
 
 mkPVEph :: VSpace -> Address -> TVar (RDV a) -> TypeRep -> IO PVEph
-mkPVEph !vc !addr !tvar !ty = 
+mkPVEph !vc !addr !tvar !ty =
     mkWeakTVar tvar (clearPVar vc addr) >>= \ wkTVar ->
     return $! PVEph addr ty wkTVar
 {-# INLINE mkPVEph #-}
@@ -180,12 +180,12 @@ loadPVarTVar !addr !ty !mpv =
     case Map.lookup addr mpv of
         Nothing -> return Nothing
         Just pve -> do
-            let tye = pveph_type pve 
+            let tye = pveph_type pve
             unless (ty == tye) (fail $ eTypeMismatch addr ty tye)
             _getPVEphTVar pve
 
 eTypeMismatch :: Address -> TypeRep -> TypeRep -> String
-eTypeMismatch addr tyNew tyOld = 
+eTypeMismatch addr tyNew tyOld =
     showString "PVar user error: address " . shows addr .
     showString " type mismatch on load. " .
     showString " Existing: " . shows tyOld .
@@ -219,7 +219,7 @@ _getPVEphTVar = Weak.deRefWeak . _u where
 -- | Construct a new VRef and initialize cache with given value.
 -- If cache exists, will touch existing cache as if dereferenced.
 newVRefIO :: (VCacheable a) => VSpace -> a -> CacheMode -> IO (VRef a)
-newVRefIO vc v cm = 
+newVRefIO vc v cm =
     runVPutIO vc (put v) >>= \ ((), _data) ->
     allocVRefIO vc _data >>= \ vref ->
     join $ atomicModifyIORef (vref_cache vref) $ \ c -> case c of
@@ -240,7 +240,7 @@ newVRefIO vc v cm =
 -- I imagine ephemerons to have a fair amount of overhead.
 initVRefCache :: VRef a -> IO ()
 initVRefCache !r = do
-    let vc = vref_space r 
+    let vc = vref_space r
     vrefs <- mem_vrefs <$> readMVar (vcache_memory vc)
     case Map.lookup (vref_addr r) vrefs >>= Map.lookup (vref_type r) of
         Nothing -> fail $ "VCache bug: " ++ show r ++ " should be in mem_vrefs!"
@@ -249,7 +249,7 @@ initVRefCache !r = do
 
 -- | Construct a new VRef without touching the cache. This allows the
 -- value to be removed from memory soon after construction.
-newVRefIO' :: (VCacheable a) => VSpace -> a -> IO (VRef a) 
+newVRefIO' :: (VCacheable a) => VSpace -> a -> IO (VRef a)
 newVRefIO' !vc v = runVPutIO vc (put v) >>= allocVRefIO vc . snd
 {-# INLINE newVRefIO' #-}
 
@@ -259,7 +259,7 @@ newVRefIO' !vc v = runVPutIO vc (put v) >>= allocVRefIO vc . snd
 -- allocation.
 --
 allocVRefIO :: (VCacheable a) => VSpace -> ByteString -> IO (VRef a)
-allocVRefIO !vc !_data = 
+allocVRefIO !vc !_data =
     let _name = hash _data in
     withByteStringVal _name $ \ vName ->
     withByteStringVal _data $ \ vData ->
@@ -268,14 +268,14 @@ allocVRefIO !vc !_data =
     seek (candidateVRefInDB vc txn vData) caddrs >>= \ mbVRef ->
     case mbVRef of
         Just !vref -> return vref -- found matching VRef in database
-        Nothing -> modifyMVarMasked (vcache_memory vc) $ \ m -> 
+        Nothing -> modifyMVarMasked (vcache_memory vc) $ \ m ->
             case findRecentVRef _name _data m of
                 Just addr -> addr2vref' vc addr m
                 Nothing -> do -- allocate new vref
                     let ac = mem_alloc m
                     let addr = alloc_new_addr ac
                     let frm' = addVRefAlloc addr _name _data (alloc_frm_next ac)
-                    let addr' = 2 + (alloc_new_addr ac) 
+                    let addr' = 2 + (alloc_new_addr ac)
                     let ac' = ac { alloc_new_addr = addr', alloc_frm_next = frm' }
                     let m' = m { mem_alloc = ac' }
                     signalAlloc vc
@@ -301,11 +301,11 @@ findRecentVRef _name _data m = allocFrameSearch ff (mem_alloc m) where
 
 -- list all values associated with a given key
 listDups' :: MDB_txn -> MDB_dbi' -> MDB_val -> IO [MDB_val]
-listDups' txn dbi vKey = 
+listDups' txn dbi vKey =
     alloca $ \ pKey ->
     alloca $ \ pVal ->
     withCursor' txn dbi $ \ crs -> do
-    let loop l b = 
+    let loop l b =
             if not b then return l else
             peek pVal >>= \ v ->
             mdb_cursor_get' MDB_NEXT_DUP crs pKey pVal >>= \ b' ->
@@ -331,7 +331,7 @@ candidateVRefInDB vc txn vData vCandidateAddr = do
     case mbR of
         Nothing -> -- inconsistent hashmap and memory; this should never happen
             peekAddr vCandidateAddr >>= \ addr ->
-            fail $ "VCache bug: undefined address " ++ show addr ++ " in hashmap" 
+            fail $ "VCache bug: undefined address " ++ show addr ++ " in hashmap"
         Just vData' ->
             let bSameSize = mv_size vData == mv_size vData' in
             if not bSameSize then return Nothing else
@@ -353,12 +353,12 @@ peekAddr v =
     peekAligned (castPtr (mv_data v))
 {-# INLINABLE peekAddr #-}
 
-   
+
 seek :: (Monad m) => (a -> m (Maybe b)) -> [a] -> m (Maybe b)
 seek _ [] = return Nothing
 seek f (x:xs) = f x >>= continue where
     continue Nothing = seek f xs
-    continue r@(Just _) = return r 
+    continue r@(Just _) = return r
 
 -- Intermediate data to allocate a new PVar. We don't know the
 -- address yet, but we do know every other relevant aspect of
@@ -376,7 +376,7 @@ data AllocPVar a = AllocPVar
 newPVar :: (VCacheable a) => a -> VTx (PVar a)
 newPVar x = do
     vc <- getVTxSpace
-    pvar <- liftSTM $ unsafeIOToSTM $ 
+    pvar <- liftSTM $ unsafeIOToSTM $
                 newTVarIO (RDV x) >>= \ tvar ->
                 modifyMVarMasked (vcache_memory vc) $
                 allocPVar vc $ allocPlaceHolder BS.empty tvar
@@ -387,7 +387,7 @@ allocPlaceHolder :: ByteString -> TVar (RDV a) -> AllocPVar a
 allocPlaceHolder _name tvar = AllocPVar
     { alloc_pvar_name = _name
     , alloc_pvar_data = BS.singleton 0
-    , alloc_pvar_tvar = tvar 
+    , alloc_pvar_tvar = tvar
     }
 
 -- | Create a new, anonymous PVar via the IO monad. This is similar
@@ -413,20 +413,20 @@ preAllocPVarIO vc _name x = do
 
 -- | Create an array of PVars with a given set of initial values. This
 -- is equivalent to `mapM newPVar`, but guarantees adjacent addresses
--- in the persistence layer. This is mostly useful when working with 
+-- in the persistence layer. This is mostly useful when working with
 -- large arrays, to simplify reasoning about paging performance.
 newPVars :: (VCacheable a) => [a] -> VTx [PVar a]
 newPVars [] = return []
 newPVars xs = do
-    vc <- getVTxSpace 
+    vc <- getVTxSpace
     pvars <- liftSTM $ unsafeIOToSTM $ do
         tvars <- mapM (newTVarIO . RDV) xs
-        let apvs = fmap (allocPlaceHolder BS.empty) tvars 
+        let apvs = fmap (allocPlaceHolder BS.empty) tvars
         allocPVars vc apvs
     sequence_ (L.zipWith markForWrite pvars xs)
     return pvars
 
--- | Create an array of adjacent PVars via the IO monad. 
+-- | Create an array of adjacent PVars via the IO monad.
 newPVarsIO :: (VCacheable a) => VSpace -> [a] -> IO [PVar a]
 newPVarsIO _ [] = return []
 newPVarsIO vc xs = do
@@ -437,7 +437,7 @@ newPVarsIO vc xs = do
 
 -- add a list of PVars to memory, acquiring addresses as we go.
 allocPVars :: (VCacheable a) => VSpace -> [AllocPVar a] -> IO [PVar a]
-allocPVars vc xs = 
+allocPVars vc xs =
     let step (m, vars) apv =
             allocPVar vc apv m >>= \ (m', pvar) ->
             return (m', pvar:vars)
@@ -458,7 +458,7 @@ _allocPVar _dummy !vc !apv !m = do
     let addr = 1 + (alloc_new_addr ac)
     pveph <- mkPVEph vc addr tvar ty
     let pvar = PVar addr tvar vc ty put
-    let _name = alloc_pvar_name apv 
+    let _name = alloc_pvar_name apv
     let _data = alloc_pvar_data apv
     let frm' = addPVarAlloc addr _name _data (alloc_frm_next ac)
     let pvars' = addPVEph pveph (mem_pvars m)
@@ -484,18 +484,18 @@ addPVarAlloc addr _name _data (AllocFrame l s r i) =
 -- operation. If the PVar exists, its value is lazily read from the
 -- persistence layer. Otherwise, the given initial value is stored.
 -- To reset a root PVar, simply write before reading.
--- 
+--
 -- The recommended practice for roots is to use only a few of them for
 -- each persistent software component (i.e. each plugin, WAI app, etc.)
 -- similarly to how a module might use just a few global variables. If
 -- you need a dynamic set of variables, such as one per client, model
--- that explicitly using anonymous PVars. 
+-- that explicitly using anonymous PVars.
 --
 loadRootPVar :: (VCacheable a) => VCache -> ByteString -> a -> PVar a
 loadRootPVar vc name ini = unsafePerformIO (loadRootPVarIO vc name ini)
 {-# INLINE loadRootPVar #-}
 
--- | Load a root PVar in the IO monad. This is convenient to control 
+-- | Load a root PVar in the IO monad. This is convenient to control
 -- where errors are detected or when initialization is performed.
 -- See loadRootPVar.
 loadRootPVarIO :: (VCacheable a) => VCache -> ByteString -> a -> IO (PVar a)
@@ -522,11 +522,10 @@ _loadRootPVarIO vc !_name ini = withRdOnlyTxn vc $ \ txn ->
                     Just rn -> addr2pvar' vc (fst rn) m -- recent allocation
                     Nothing -> signalAlloc vc >> allocPVar vc apv m -- new root PVar
 {-# NOINLINE _loadRootPVarIO #-}
- 
+
 -- report allocation to the writer thread
 signalAlloc :: VSpace -> IO ()
-signalAlloc vc = void $ tryPutMVar (vcache_signal vc) () 
+signalAlloc vc = void $ tryPutMVar (vcache_signal vc) ()
 
 foreign import ccall unsafe "string.h memcmp" c_memcmp
     :: Ptr Word8 -> Ptr Word8 -> CSize -> IO CInt
-

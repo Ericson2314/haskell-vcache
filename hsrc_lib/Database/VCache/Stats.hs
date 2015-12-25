@@ -1,4 +1,3 @@
-
 module Database.VCache.Stats
     ( VCacheStats(..)
     , vcacheStats
@@ -24,15 +23,15 @@ data VCacheStats = VCacheStats
         , vcstat_mem_pvars      :: {-# UNPACK #-} !Int  -- ^ number of PVars in Haskell process memory
         , vcstat_eph_count      :: {-# UNPACK #-} !Int  -- ^ number of addresses with zero references
         , vcstat_alloc_pos      :: {-# UNPACK #-} !Address -- ^ address to next be used by allocator
-        , vcstat_alloc_count    :: {-# UNPACK #-} !Int  -- ^ number of allocations by this process 
-        , vcstat_cache_limit    :: {-# UNPACK #-} !Int  -- ^ target cache size in bytes 
+        , vcstat_alloc_count    :: {-# UNPACK #-} !Int  -- ^ number of allocations by this process
+        , vcstat_cache_limit    :: {-# UNPACK #-} !Int  -- ^ target cache size in bytes
         , vcstat_cache_size     :: {-# UNPACK #-} !Int  -- ^ estimated cache size in bytes
         , vcstat_gc_count       :: {-# UNPACK #-} !Int  -- ^ number of addresses GC'd by this process
         } deriving (Show, Ord, Eq)
 
 -- | Compute some miscellaneous statistics for a VCache instance at
 -- runtime. These aren't really useful for anything, except to gain
--- some confidence about activity or comprehension of performance. 
+-- some confidence about activity or comprehension of performance.
 vcacheStats :: VSpace -> IO VCacheStats
 vcacheStats vc = withRdOnlyTxn vc $ \ txnStat -> do
     let db = vcache_db_env vc
@@ -47,10 +46,10 @@ vcacheStats vc = withRdOnlyTxn vc $ \ txnStat -> do
     cLimit <- readIORef (vcache_climit vc)
     cSizeEst <- readIORef (vcache_csize vc)
     cvrefs <- readMVar (vcache_cvrefs vc)
-    
-    let fileSize = (1 + (fromIntegral $ me_last_pgno envInfo)) 
+
+    let fileSize = (1 + (fromIntegral $ me_last_pgno envInfo))
                  * (fromIntegral $ ms_psize envStat)
-    let vrefCount = (fromIntegral $ ms_entries hashStat) 
+    let vrefCount = (fromIntegral $ ms_entries hashStat)
     let pvarCount = (fromIntegral $ ms_entries dbMemStat) - vrefCount
     let ephCount = (fromIntegral $ ms_entries ephStat)
     let rootCount = (fromIntegral $ ms_entries rootStat)
@@ -60,7 +59,7 @@ vcacheStats vc = withRdOnlyTxn vc $ \ txnStat -> do
     let memPVarsCount = Map.size (mem_pvars memory)
     let allocPos = alloc_new_addr (mem_alloc memory)
     let allocDiff = allocPos - vcache_alloc_init vc
-    let allocCount = fromIntegral $ allocDiff `div` 2 
+    let allocCount = fromIntegral $ allocDiff `div` 2
     return $ VCacheStats
         { vcstat_file_size = fileSize
         , vcstat_vref_count = vrefCount
@@ -75,4 +74,3 @@ vcacheStats vc = withRdOnlyTxn vc $ \ txnStat -> do
         , vcstat_cache_size = cacheSizeBytes
         , vcstat_gc_count = gcCount
         }
-

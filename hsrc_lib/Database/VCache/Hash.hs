@@ -1,4 +1,3 @@
-
 -- This is the hash function for content addressing.
 module Database.VCache.Hash
     ( hash

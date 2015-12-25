@@ -1,5 +1,3 @@
-
-
 module Database.VCache.Sync
     ( vcacheSync
     ) where

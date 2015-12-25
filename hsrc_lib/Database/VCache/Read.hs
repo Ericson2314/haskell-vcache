@@ -1,4 +1,3 @@
-
 module Database.VCache.Read
     ( readAddrIO
     , readRefctIO
@@ -29,14 +28,14 @@ readAddrIO vc addr = withAddrValIO vc addr . readVal vc
 {-# INLINE readAddrIO #-}
 
 withAddrValIO :: VSpace -> Address -> (MDB_val -> IO a) -> IO a
-withAddrValIO vc addr action = 
+withAddrValIO vc addr action =
     alloca $ \ pAddr ->
     poke pAddr addr >>
     let vAddr = MDB_val { mv_data = castPtr pAddr
                         , mv_size = fromIntegral (sizeOf addr)
                         }
     in
-    withRdOnlyTxn vc $ \ txn -> 
+    withRdOnlyTxn vc $ \ txn ->
     mdb_get' txn (vcache_db_memory vc) vAddr >>= \ mbData ->
     case mbData of
         Just vData -> action vData -- found data in database (ideal)
@@ -64,22 +63,22 @@ readVal vc p v = _vget (vgetFull p) s0 >>= retv where
 -- asserts that we parse all available input.
 vgetFull :: VGet a -> VGet a
 vgetFull parse = do
-    vgetInit 
+    vgetInit
     r <- parse
     assertDone
     return r
 
 assertDone :: VGet ()
 assertDone = isEmpty >>= \ b -> unless b (fail emsg) where
-    emsg = "VCache: failed to read full input" 
+    emsg = "VCache: failed to read full input"
 {-# INLINE assertDone #-}
 
 
--- | Read a reference count for a given address. 
+-- | Read a reference count for a given address.
 readRefctIO :: VSpace -> Address -> IO Int
-readRefctIO vc addr = 
+readRefctIO vc addr =
     alloca $ \ pAddr ->
-    withRdOnlyTxn vc $ \ txn -> 
+    withRdOnlyTxn vc $ \ txn ->
     poke pAddr addr >>
     let vAddr = MDB_val { mv_data = castPtr pAddr
                         , mv_size = fromIntegral (sizeOf addr) }
@@ -89,11 +88,7 @@ readRefctIO vc addr =
 
 -- | Zero-copy access to raw bytes for an address.
 withBytesIO :: VSpace -> Address -> (Ptr Word8 -> Int -> IO a) -> IO a
-withBytesIO vc addr action = 
-    withAddrValIO vc addr $ \ v -> 
+withBytesIO vc addr action =
+    withAddrValIO vc addr $ \ v ->
     action (mv_data v) (fromIntegral (mv_size v))
 {-# INLINE withBytesIO #-}
-
-
-
-

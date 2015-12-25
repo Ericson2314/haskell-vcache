@@ -79,43 +79,43 @@ isPVarAddr = not . isVRefAddr
 -- When dereferenced, the cache is checked or the value is read from
 -- the database then cached. Variants of vref and deref control cache
 -- behavior.
--- 
+--
 -- VCacheable values may themselves contain VRefs and PVars, storing
 -- just the address. Very large structured data is readily modeled
 -- by using VRefs to load just the pieces you need. However, there is
 -- one major constraint:
 --
--- VRefs may only represent acyclic structures. 
+-- VRefs may only represent acyclic structures.
 --
 -- If developers want cyclic structure, they need a PVar in the chain.
 -- Alternatively, cycles may be modeled indirectly using explicit IDs.
--- 
+--
 -- Besides memory caching, VRefs also utilize structure sharing: all
--- VRefs sharing the same serialized representation will share the 
+-- VRefs sharing the same serialized representation will share the
 -- same address. Structure sharing enables VRefs to be compared for
 -- equality without violating conceptual purity. It also simplifies
 -- reasoning about idempotence, storage costs, memoization, etc..
 --
-data VRef a = VRef 
+data VRef a = VRef
     { vref_addr   :: {-# UNPACK #-} !Address            -- ^ address within the cache
-    , vref_cache  :: {-# UNPACK #-} !(IORef (Cache a))  -- ^ cached value & weak refs 
+    , vref_cache  :: {-# UNPACK #-} !(IORef (Cache a))  -- ^ cached value & weak refs
     , vref_space  :: !VSpace                            -- ^ virtual address space for VRef
     , vref_type   :: !TypeRep                           -- ^ type of value held by VRef
     , vref_parse  :: !(VGet a)                          -- ^ parser for this VRef
     } deriving (Typeable)
 instance Eq (VRef a) where (==) = (==) `on` vref_cache
-instance Show (VRef a) where 
+instance Show (VRef a) where
     showsPrec _ v = showString "VRef#" . shows (vref_addr v)
                   . showString "::" . shows (vref_type v)
 
 -- For every VRef we have in memory, we need an ephemeron in a table.
 -- This ephemeron table supports structure sharing, caching, and GC.
 -- I model this ephemeron by use of `mkWeakMVar`.
-data VREph = forall a . VREph 
+data VREph = forall a . VREph
     { vreph_addr  :: {-# UNPACK #-} !Address
     , vreph_type  :: !TypeRep
     , vreph_cache :: {-# UNPACK #-} !(Weak (IORef (Cache a)))
-    } 
+    }
 type VREphMap = Map Address (Map TypeRep VREph)
     -- Address is at the top layer of the map mostly to simplify GC.
 
@@ -126,30 +126,30 @@ addVREph e = Map.alter (Just . maybe i0 ins) (vreph_addr e) where
     i0 = Map.singleton ty e
     ins = Map.insert ty e
 {-# INLINABLE addVREph #-}
-                    
+
 takeVREph :: Address -> TypeRep -> VREphMap -> Maybe (VREph, VREphMap)
-takeVREph !addr !ty !em = 
+takeVREph !addr !ty !em =
     case Map.lookup addr em of
          Nothing -> Nothing
          Just tym -> case Map.lookup ty tym of
             Nothing -> Nothing
-            Just e -> 
+            Just e ->
                 let em' = if (1 == Map.size tym)
-                        then Map.delete addr em 
+                        then Map.delete addr em
                         else Map.insert addr (Map.delete ty tym) em
                 in
-                Just (e, em') 
+                Just (e, em')
 {-# INLINABLE takeVREph #-}
 
 
--- TODO: I may need a way to "reserve" VRef addresses for destruction, 
--- i.e. such that I can guard against 
+-- TODO: I may need a way to "reserve" VRef addresses for destruction,
+-- i.e. such that I can guard against
 
 -- Every VRef contains its own cache. Thus, there is no extra lookup
 -- overhead to test the cache. The cache includes an integer as a
 -- bitfield to describe mode.
-data Cache a 
-        = NotCached 
+data Cache a
+        = NotCached
         | Cached a {-# UNPACK #-} !Word16
 
 --
@@ -159,9 +159,9 @@ data Cache a
 --   bits 5..6: cache mode 0..3
 --   bit 7: toggle; set 1 by manager, 0 by derefc
 --
--- Weight is used to guide aggressiveness of the cache manager. 
+-- Weight is used to guide aggressiveness of the cache manager.
 -- Currently, it just records the size of the encoded value, and
--- does not account for expansion of values after parse. 
+-- does not account for expansion of values after parse.
 
 
 -- | Cache modes are used when deciding, heuristically, whether to
@@ -173,14 +173,14 @@ data Cache a
 -- removed, but its mode is greater than zero, the mode is reduced
 -- instead.
 --
--- The default for vref and deref is CacheMode1. Use of vrefc or 
+-- The default for vref and deref is CacheMode1. Use of vrefc or
 -- derefc may specify other modes. Cache mode is monotonic: if
 -- the same VRef is deref'd with two different modes, the higher
 -- mode will be favored.
 --
 -- Note: Regardless of mode, a VRef that is fully GC'd from the
 -- Haskell layer will ensure any cached content is also GC'd.
--- 
+--
 data CacheMode
         = CacheMode0
         | CacheMode1
@@ -210,15 +210,15 @@ mkVRefCache val !w !cm = Cached val cw where
 
 -- | A PVar is a mutable variable backed by VCache. PVars can be read
 -- or updated transactionally (see VTx), and may store by reference
--- as part of domain data (see VCacheable). 
+-- as part of domain data (see VCacheable).
 --
--- A PVar is not cached. If you want memory cached contents, you'll 
--- need a PVar that contains one or more VRefs. However, the first 
--- read from a PVar is lazy, so merely referencing a PVar does not 
+-- A PVar is not cached. If you want memory cached contents, you'll
+-- need a PVar that contains one or more VRefs. However, the first
+-- read from a PVar is lazy, so merely referencing a PVar does not
 -- require loading its contents into memory.
 --
--- Due to how updates are batched, high frequency or bursty updates 
--- on a PVar should perform acceptably. Not every intermediate value 
+-- Due to how updates are batched, high frequency or bursty updates
+-- on a PVar should perform acceptably. Not every intermediate value
 -- is written to disk.
 --
 -- Anonymous PVars will be garbage collected if not in use. Persistence
@@ -228,7 +228,7 @@ mkVRefCache val !w !cm = Cached val cw where
 -- disconnecting them from root.
 --
 -- Note: PVars must never contain undefined or error values, nor any
--- value that cannot be serialized by a VCacheable instance. 
+-- value that cannot be serialized by a VCacheable instance.
 --
 data PVar a = PVar
     { pvar_addr  :: {-# UNPACK #-} !Address
@@ -240,12 +240,12 @@ data PVar a = PVar
 
 type Writer a = (a -> VPut ())
 instance Eq (PVar a) where (==) = (==) `on` pvar_data
-instance Show (PVar a) where 
+instance Show (PVar a) where
     showsPrec _ pv = showString "PVar#" . shows (pvar_addr pv)
                    . showString "::" . shows (pvar_type pv)
 
 -- ephemeron table for PVars.
-data PVEph = forall a . PVEph 
+data PVEph = forall a . PVEph
     { pveph_addr :: {-# UNPACK #-} !Address
     , pveph_type :: !TypeRep
     , pveph_data :: {-# UNPACK #-} !(Weak (TVar (RDV a)))
@@ -262,7 +262,7 @@ addPVEph pve = Map.insert (pveph_addr pve) pve
 data RDV a = RDV a
 
 -- | VCache supports a filesystem-backed address space plus a set of
--- persistent, named root variables that can be loaded from one run 
+-- persistent, named root variables that can be loaded from one run
 -- of the application to another. VCache supports a simple filesystem
 -- like model to resist namespace collisions between named roots.
 --
@@ -270,10 +270,10 @@ data RDV a = RDV a
 -- > vcacheSubdir :: ByteString -> VCache -> VCache
 -- > loadRootPVar :: (VCacheable a) => VCache -> ByteString -> a -> PVar a
 --
--- The normal use of VCache is to open VCache in the main function, 
+-- The normal use of VCache is to open VCache in the main function,
 -- use vcacheSubdir for each major framework, plugin, or independent
 -- component that might need persistent storage, then load at most a
--- few root PVars per component. Most domain modeling should be at 
+-- few root PVars per component. Most domain modeling should be at
 -- the data layer, i.e. the type held by the PVar.
 --
 -- See VSpace, VRef, and PVar for more information.
@@ -292,16 +292,16 @@ data VCache = VCache
 -- one update to another.
 --
 -- In theory, VSpace could run out of 64-bit addresses. In practice, this
--- isn't a real concern - a quarter million years at a sustained million 
--- allocations per second. 
+-- isn't a real concern - a quarter million years at a sustained million
+-- allocations per second.
 --
 data VSpace = VSpace
     { vcache_lockfile   :: !FileLock -- block concurrent use of VCache file
 
-    -- LMDB contents. 
+    -- LMDB contents.
     , vcache_db_env     :: !MDB_env
     , vcache_db_memory  :: {-# UNPACK #-} !MDB_dbi' -- address → value
-    , vcache_db_vroots  :: {-# UNPACK #-} !MDB_dbi' -- path → address 
+    , vcache_db_vroots  :: {-# UNPACK #-} !MDB_dbi' -- path → address
     , vcache_db_caddrs  :: {-# UNPACK #-} !MDB_dbi' -- hashval → [address]
     , vcache_db_refcts  :: {-# UNPACK #-} !MDB_dbi' -- address → Word64
     , vcache_db_refct0  :: {-# UNPACK #-} !MDB_dbi' -- address → ()
@@ -324,7 +324,7 @@ data VSpace = VSpace
     -- share persistent variables for safe STM
 
     -- Further, I need...
-    --   log or queue of 'new' vrefs and pvars, 
+    --   log or queue of 'new' vrefs and pvars,
     --     including those still being written
     --   a thread performing writes and incremental GC
     --   a channel to talk to that thread
@@ -337,7 +337,7 @@ instance Eq VSpace where (==) = (==) `on` vcache_signal
 -- needed: a transactional queue of updates to PVars
 
 -- | The Allocator both tracks the 'bump-pointer' address for the
--- next allocation, plus in-memory logs for recent and near future 
+-- next allocation, plus in-memory logs for recent and near future
 -- allocations.
 --
 -- The log has three frames, based on the following observations:
@@ -348,9 +348,9 @@ instance Eq VSpace where (==) = (==) `on` vcache_signal
 --   * the previous write frame
 --   * the current write frame
 --   * the next write frame (allocated during write)
--- 
+--
 -- Each write frame includes content for both the primary (db_memory)
--- and secondary (db_caddrs or db_vroots) indices. 
+-- and secondary (db_caddrs or db_vroots) indices.
 --
 -- Normal Data.Map is favored because I want the keys in sorted order
 -- when writing into the LMDB layer anyway.
@@ -363,10 +363,10 @@ data Allocator = Allocator
     }
 
 -- a single allocation frame corresponds to new content written
--- while the writer is busy in the background. 
-data AllocFrame = AllocFrame 
+-- while the writer is busy in the background.
+data AllocFrame = AllocFrame
     { alloc_list :: !(Map Address ByteString)    -- recent allocations
-    , alloc_seek :: !(Map ByteString [Address])  -- vref content addressing 
+    , alloc_seek :: !(Map ByteString [Address])  -- vref content addressing
     , alloc_root :: ![(Address, ByteString)]     -- root PVars with path names
     , alloc_init :: {-# UNPACK #-} !Address      -- next address at frame start.
     }
@@ -384,17 +384,17 @@ allocFrameSearch f a = f n <|> f c <|> f p where
 --
 -- To keep this simple, GC is performed by the writer thread. Other
 -- threads must worry about reading outdated reference counts. This
--- also means we only need the two frames: a reader of frame N-2  
+-- also means we only need the two frames: a reader of frame N-2
 -- only needs to prevent revival of VRefs GC'd at N-1 or N.
 --
 -- ASIDE: a nursery GC pass eliminates transient VRefs that needn't
 -- be recorded in the database, e.g. for a short-lived trie node. In
 -- this case, we may simply remove the reference from the allocator.
 --
-data GC = GC 
+data GC = GC
     { gc_frm_curr :: !GCFrame
     , gc_frm_prev :: !GCFrame
-    } 
+    }
 data GCFrame = forall a . GCFrame !(Map Address a)
     -- The concrete map type depends on the writer
 
@@ -407,8 +407,8 @@ recentGC gc addr = ff c || ff p where
 
 -- | The Memory datatype tracks allocations, GC, and ephemeron
 -- tables for tracking both PVars and VRefs in Haskell memory.
--- These are combined into one type mostly because typical 
--- operations on them are atomic... and STM isn't permitted 
+-- These are combined into one type mostly because typical
+-- operations on them are atomic... and STM isn't permitted
 -- because vref constructors are used with unsafePerformIO.
 data Memory = Memory
     { mem_vrefs  :: !VREphMap   -- ^ In-memory VRefs
@@ -418,7 +418,7 @@ data Memory = Memory
     }
 
 
--- simple read-only operations 
+-- simple read-only operations
 --  LMDB transaction is aborted when finished, so cannot open DBIs
 withRdOnlyTxn :: VSpace -> (MDB_txn -> IO a) -> IO a
 withRdOnlyTxn vc = withLock . bracket newTX endTX where
@@ -436,15 +436,15 @@ withByteStringVal (BSI.PS fp off len) action = withForeignPtr fp $ \ p ->
 -- PVars and STM resources (TVars, TArrays, etc..). VTx is a thin
 -- layer above STM, additionally tracking which PVars are written so
 -- it can push the batch to a background writer thread upon commit.
--- 
+--
 -- VTx supports full ACID semantics (atomic, consistent, isolated,
--- durable), but durability is optional (see markDurable). 
--- 
+-- durable), but durability is optional (see markDurable).
+--
 newtype VTx a = VTx { _vtx :: StateT VTxState STM a }
     deriving (Monad, Functor, Applicative, Alternative, MonadPlus)
 
 -- | In addition to the STM transaction, I need to track whether
--- the transaction is durable (such that developers may choose 
+-- the transaction is durable (such that developers may choose
 -- based on internal domain-model concerns) and which variables
 -- have been read or written. All PVars involved must be part of
 -- the same VSpace.
@@ -483,14 +483,14 @@ data CacheSizeEst = CacheSizeEst
     , csze_addr_sqsz  :: {-# UNPACK #-} !Double -- average of squares
     }
 
-type WriteLog  = Map Address TxW 
+type WriteLog  = Map Address TxW
 data TxW = forall a . TxW !(Writer a) a
     -- Note: I can either record just the PVar, or the PVar and its value.
     -- The latter is favorable because it avoids risk of creating very large
     -- transactions in the writer thread (i.e. to read the updated PVars).
 
--- | Collection of writes 
-data Writes = Writes 
+-- | Collection of writes
+data Writes = Writes
     { write_data :: !WriteLog
     , write_sync :: ![MVar ()]
     }
@@ -504,7 +504,7 @@ data WriteCt = WriteCt
     , wct_sync   :: {-# UNPACK #-} !Int -- how many sync requests
     }
 
-data VTxBatch = VTxBatch SyncOp WriteLog 
+data VTxBatch = VTxBatch SyncOp WriteLog
 type SyncOp = IO () -- called after write is synchronized.
 
 type Ptr8 = Ptr Word8
@@ -517,10 +517,10 @@ type PtrLoc = Ptr8
 -- include VRefs and PVars in the output.
 --
 -- Content emitted by VPut will generally be read only by VCache. So
--- it may be worth optimizing some cases, such as lists are written 
+-- it may be worth optimizing some cases, such as lists are written
 -- in reverse such that readers won't need to reverse the list.
 newtype VPut a = VPut { _vput :: VPutS -> IO (VPutR a) }
-data VPutS = VPutS 
+data VPutS = VPutS
     { vput_space    :: !VSpace                -- ^ destination space
     , vput_children :: ![Address]             -- ^ addresses written (addends buffer)
     , vput_buffer   :: !(IORef PtrIni)        -- ^ buffer for easy free, realloc
@@ -534,8 +534,8 @@ data VPutR r = VPutR
     , vput_state  :: !VPutS
     }
 
-instance Functor VPut where 
-    fmap f m = VPut $ \ s -> 
+instance Functor VPut where
+    fmap f m = VPut $ \ s ->
         _vput m s >>= \ (VPutR r s') ->
         return (VPutR (f r) s')
     {-# INLINE fmap #-}
@@ -559,17 +559,17 @@ instance Monad VPut where
 
 
 -- | VGet is a parser combinator monad for VCache. Unlike pure binary
--- parsers, VGet supports reads from a stack of VRefs and PVars to 
+-- parsers, VGet supports reads from a stack of VRefs and PVars to
 -- directly model structured data.
 --
 newtype VGet a = VGet { _vget :: VGetS -> IO (VGetR a) }
-data VGetS = VGetS 
+data VGetS = VGetS
     { vget_children :: ![Address]
     , vget_target   :: {-# UNPACK #-} !PtrLoc
     , vget_limit    :: {-# UNPACK #-} !PtrEnd
     , vget_space    :: !VSpace
     }
-data VGetR r 
+data VGetR r
     = VGetR r !VGetS
     | VGetE String
 
@@ -579,7 +579,7 @@ instance Functor VGet where
         _vget m s >>= \ c ->
         return $ case c of
             VGetR r s' -> VGetR (f r) s'
-            VGetE msg -> VGetE msg 
+            VGetE msg -> VGetE msg
     {-# INLINE fmap #-}
 instance Applicative VGet where
     pure = return
@@ -619,20 +619,19 @@ instance MonadPlus VGet where
     {-# INLINE mplus #-}
 
 
--- | To be utilized with VCache, a value must be serializable as a 
+-- | To be utilized with VCache, a value must be serializable as a
 -- simple sequence of binary data and child VRefs. Also, to put then
 -- get a value must result in equivalent values. Further, values are
 -- Typeable to support memory caching of values loaded.
 --
--- Developers must ensure that `get` on the serialization from `put` 
+-- Developers must ensure that `get` on the serialization from `put`
 -- returns the same value. And `get` should be backwards compatible
--- to older versions of the same type. Consider version wrappers, 
+-- to older versions of the same type. Consider version wrappers,
 -- cf. SafeCopy package.
--- 
-class (Typeable a) => VCacheable a where 
-    -- | Serialize a value as a stream of bytes and value references. 
+--
+class (Typeable a) => VCacheable a where
+    -- | Serialize a value as a stream of bytes and value references.
     put :: a -> VPut ()
 
     -- | Parse a value from its serialized representation into memory.
     get :: VGet a
-

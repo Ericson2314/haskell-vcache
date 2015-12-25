@@ -22,7 +22,7 @@ import Data.Word
 import Data.ByteString (ByteString)
 import Foreign.Ptr
 import Foreign.Storable
-import System.IO.Unsafe 
+import System.IO.Unsafe
 
 import Database.VCache.Types
 import Database.VCache.Alloc
@@ -33,17 +33,17 @@ import Database.VCache.Read
 -- from the database. The given value will be placed in the cache
 -- unless the same vref has already been constructed.
 vref :: (VCacheable a) => VSpace -> a -> VRef a
-vref = vrefc CacheMode1 
+vref = vrefc CacheMode1
 {-# INLINE vref #-}
 
--- | Construct a VRef with an alternative cache control mode. 
+-- | Construct a VRef with an alternative cache control mode.
 vrefc :: (VCacheable a) => CacheMode -> VSpace -> a -> VRef a
 vrefc cm vc v = unsafePerformIO (newVRefIO vc v cm)
 {-# INLINABLE vrefc #-}
 
--- | In some cases, developers can reasonably assume they won't need a 
+-- | In some cases, developers can reasonably assume they won't need a
 -- value in the near future. In these cases, use the vref' constructor
--- to allocate a VRef without caching the content. 
+-- to allocate a VRef without caching the content.
 vref' :: (VCacheable a) => VSpace -> a -> VRef a
 vref' vc v = unsafePerformIO (newVRefIO' vc v)
 {-# INLINABLE vref' #-}
@@ -53,7 +53,7 @@ readVRef v = readAddrIO (vref_space v) (vref_addr v) (vref_parse v)
 {-# INLINE readVRef #-}
 
 -- | Dereference a VRef, obtaining its value. If the value is not in
--- cache, it will be read into the database then cached. Otherwise, 
+-- cache, it will be read into the database then cached. Otherwise,
 -- the value is read from cache and the cache is touched to restart
 -- any expiration.
 --
@@ -65,7 +65,7 @@ deref = derefc CacheMode1
 
 -- | Dereference a VRef with an alternative cache control mode.
 derefc :: CacheMode -> VRef a -> a
-derefc cm v = unsafeDupablePerformIO $ 
+derefc cm v = unsafeDupablePerformIO $
     unsafeInterleaveIO (readVRef v) >>= \ lazy_read_rw ->
     join $ atomicModifyIORef (vref_cache v) $ \ c -> case c of
         Cached r bf ->
@@ -83,21 +83,21 @@ derefc cm v = unsafeDupablePerformIO $
 -- is available, but will not update the cache. If the value is not
 -- cached, it will be read instead from the persistence layer.
 --
--- This can be useful if you know you'll only dereference a value 
+-- This can be useful if you know you'll only dereference a value
 -- once for a given task, or if the datatype involved is cheap to
 -- parse (e.g. simple bytestrings) such that there isn't a strong
 -- need to cache the parse result.
 deref' :: VRef a -> a
-deref' v = unsafePerformIO $ 
+deref' v = unsafePerformIO $
     readIORef (vref_cache v) >>= \ c -> case c of
         Cached r _ -> return r
         NotCached -> liftM fst (readVRef v)
 {-# INLINABLE deref' #-}
 
--- | Specialized, zero-copy access to a `VRef ByteString`. Access to 
+-- | Specialized, zero-copy access to a `VRef ByteString`. Access to
 -- the given ByteString becomes invalid after returning. This operation
 -- may also block the writer if it runs much longer than a single
--- writer batch (though, writer batches are frequently large enough 
+-- writer batch (though, writer batches are frequently large enough
 -- that this shouldn't be a problem if you're careful).
 --
 withVRefBytes :: VRef ByteString -> (Ptr Word8 -> Int -> IO a) -> IO a
@@ -117,11 +117,11 @@ readVarNat !p !n =
     let bDone = (0 == (w8 .&. 0x80)) in
     if bDone then return (p', n') else
     readVarNat p' n'
-    
+
 -- | Zero-copy access to the raw encoding for any VRef. The given data
 -- becomes invalid after returning. This is provided for mostly for
 -- debugging purposes, i.e. so you can peek under the hood and see how
--- things are encoded or eyeball the encoding. 
+-- things are encoded or eyeball the encoding.
 unsafeVRefEncoding :: VRef any -> (Ptr Word8 -> Int -> IO a) -> IO a
 unsafeVRefEncoding v = withBytesIO (vref_space v) (vref_addr v)
 {-# INLINE unsafeVRefEncoding #-}
@@ -139,12 +139,12 @@ unsafeVRefAddr :: VRef a -> Address
 unsafeVRefAddr = vref_addr
 {-# INLINE unsafeVRefAddr #-}
 
--- | This function allows developers to access the reference count 
+-- | This function allows developers to access the reference count
 -- for the VRef that is currently recorded in the database. This may
 -- be useful for heuristic purposes. However, caveats are needed:
 --
 -- First, due to structure sharing, a VRef may share an address with
--- VRefs of other types having the same serialized form. Reference 
+-- VRefs of other types having the same serialized form. Reference
 -- counts are at the address level.
 --
 -- Second, because the VCache writer operates in a background thread,
@@ -154,8 +154,5 @@ unsafeVRefAddr = vref_addr
 -- form of garbage collection than reference counting. This function
 -- should be considered an unstable element of the API.
 unsafeVRefRefct :: VRef a -> IO Int
-unsafeVRefRefct v = readRefctIO (vref_space v) (vref_addr v) 
+unsafeVRefRefct v = readRefctIO (vref_space v) (vref_addr v)
 {-# INLINE unsafeVRefRefct #-}
-
-
-

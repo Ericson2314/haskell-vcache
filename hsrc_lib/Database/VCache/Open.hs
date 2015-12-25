@@ -26,34 +26,34 @@ import qualified System.IO as Sys
 import qualified System.Exit as Sys
 
 import Database.LMDB.Raw
-import Database.VCache.Types 
+import Database.VCache.Types
 import Database.VCache.RWLock
 import Database.VCache.Aligned
 import Database.VCache.Write
-import Database.VCache.Clean 
+import Database.VCache.Clean
 
 
 
--- | Open a VCache with a given database file. 
+-- | Open a VCache with a given database file.
 --
 -- In most cases, a Haskell process should open VCache in the Main
 -- module then pass it as an argument to the different libraries,
 -- frameworks, plugins, and other software components that require
 -- persistent storage. Use vcacheSubdir to progect against namespace
--- collisions. 
+-- collisions.
 --
 -- When opening VCache, developers decide the maximum size and the file
 -- name. For example:
 --
 -- > vc <- openVCache 100 "db"
 --
--- This would open a VCache whose file-size limit is 100 megabytes, 
--- with the name "db", plus an additional "db-lock" lockfile. An 
+-- This would open a VCache whose file-size limit is 100 megabytes,
+-- with the name "db", plus an additional "db-lock" lockfile. An
 -- exception will be raised if these files cannot be created, locked,
 -- or opened. The size limit is passed to LMDB and is separate from
--- setVRefsCacheSize. 
+-- setVRefsCacheSize.
 --
--- Once opened, VCache typically remains open until process halt. 
+-- Once opened, VCache typically remains open until process halt.
 -- If errors are detected, e.g. due to writing an undefined value
 -- to a PVar or running out of space, VCache will attempt to halt
 -- the process.
@@ -66,16 +66,16 @@ openVCache nMB fp = do
     EasyFile.createDirectoryIfMissing True fdir
     let fpLock = fp ++ "-lock"
     let nBytes = (max 1 nMB) * 1024 * 1024
-    mbLock <- FileLock.tryLockFile fpLock FileLock.Exclusive 
+    mbLock <- FileLock.tryLockFile fpLock FileLock.Exclusive
     case mbLock of
         Nothing -> ioError $ IOE.mkIOError
             IOE.alreadyInUseErrorType
             "openVCache lockfile"
             Nothing (Just fpLock)
-        Just fl -> openVC' nBytes fl fp 
+        Just fl -> openVC' nBytes fl fp
                     `onException` FileLock.unlockFile fl
 
-vcFlags :: [MDB_EnvFlag] 
+vcFlags :: [MDB_EnvFlag]
 vcFlags = [MDB_NOSUBDIR     -- open file name, not directory name
           ,MDB_NOLOCK       -- leave lock management to VCache
           ]
@@ -92,15 +92,15 @@ vcFlags = [MDB_NOSUBDIR     -- open file name, not directory name
 vcRootPath :: BS.ByteString
 vcRootPath = BS.singleton 47
 
--- Default address for allocation. We start this high to help 
+-- Default address for allocation. We start this high to help
 -- regulate serialization sizes and simplify debugging.
-vcAllocStart :: Address 
+vcAllocStart :: Address
 vcAllocStart = 999999999
 
 -- Default cache size is somewhat arbitrary. I've chosen to set it
--- to about ten megabytes (as documented in the Cache module). 
+-- to about ten megabytes (as documented in the Cache module).
 vcDefaultCacheLimit :: Int
-vcDefaultCacheLimit = 10 * 1000 * 1000 
+vcDefaultCacheLimit = 10 * 1000 * 1000
 
 -- initial cache size
 vcInitCacheSizeEst :: CacheSizeEst
@@ -116,7 +116,7 @@ threaded = rtsSupportsBoundThreads
 
 openVC' :: Int -> FileLock -> FilePath -> IO VCache
 openVC' nBytes fl fp = do
-    
+
     unless threaded (fail "VCache needs -threaded runtime")
 
     dbEnv <- mdb_env_create
@@ -152,9 +152,9 @@ openVC' nBytes fl fp = do
                 mdb_env_close dbEnv
                 FileLock.unlockFile fl
 
-        let vc = VCache 
+        let vc = VCache
                 { vcache_path = vcRootPath
-                , vcache_space = VSpace 
+                , vcache_space = VSpace
                     { vcache_lockfile = fl
                     , vcache_db_env = dbEnv
                     , vcache_db_memory = dbiMemory
@@ -190,11 +190,11 @@ findLastAddrAllocated txn dbiMemory = alloca $ \ pKey ->
     mdb_cursor_open' txn dbiMemory >>= \ crs ->
     mdb_cursor_get' MDB_LAST crs pKey nullPtr >>= \ bFound ->
     mdb_cursor_close' crs >>
-    if (not bFound) then return vcAllocStart else 
-    peek pKey >>= \ key -> 
-    let bBadSize = fromIntegral (sizeOf vcAllocStart) /= mv_size key in 
+    if (not bFound) then return vcAllocStart else
+    peek pKey >>= \ key ->
+    let bBadSize = fromIntegral (sizeOf vcAllocStart) /= mv_size key in
     if bBadSize then fail "VCache memory table corrupted" else
-    peekAligned (castPtr (mv_data key)) 
+    peekAligned (castPtr (mv_data key))
 
 -- initialize memory based on initial allocation position
 initMemory :: Address -> Memory
@@ -234,4 +234,3 @@ indent ws = (ws ++) . indent' where
     indent' ('\n':s) = '\n' : ws ++ indent' s
     indent' (c:s) = c : indent' s
     indent' [] = []
-
