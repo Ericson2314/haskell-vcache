@@ -1,5 +1,6 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE BangPatterns #-}
-
 module Database.VCache.VGet
     ( VGet
 
@@ -12,7 +13,7 @@ module Database.VCache.VGet
     , getWord64le, getWord64be
     , getStorable
     , getVarNat, getVarInt
-    , getByteString, getByteStringLazy
+    , getByteString, getLazyByteString
     , getc
 
     -- * zero copy access
@@ -29,8 +30,10 @@ module Database.VCache.VGet
 import Control.Applicative
 
 import Data.Bits
+import Data.Bytes.Get
 import Data.Char
 import Data.Word
+import Data.Void
 import Foreign.Ptr
 import Foreign.Storable (Storable(..))
 import Foreign.Marshal.Alloc (mallocBytes,finalizerFree)
@@ -46,6 +49,165 @@ import Database.VCache.Types
 import Database.VCache.Aligned
 import Database.VCache.Alloc
 import Database.VCache.VGetAux
+
+
+instance MonadGet VGet where
+    type Remaining VGet = Word
+    type Bytes     VGet = BS.ByteString
+
+    skip n = withBytes n (const $ return ())
+    -- TODO Warning
+    ensure = getBytes
+
+    -- | lookAhead will parse a value, but not consume any input.
+    lookAhead op = VGet $ \ s ->
+        _vget op s >>= \ result ->
+        return $
+        case result of
+            VGetR r _ -> VGetR r s
+            other -> other
+
+    -- | lookAheadM will consume input only if it returns `Just a`.
+    lookAheadM op = VGet $ \ s ->
+        _vget op s >>= \ result ->
+        return $
+        case result of
+            VGetR Nothing _ -> VGetR Nothing s
+            other -> other
+
+    -- | lookAheadE will consume input only if it returns `Right b`.
+    lookAheadE op = VGet $ \ s ->
+        _vget op s >>= \ result ->
+        return $
+        case result of
+            VGetR l@(Left _) _ -> VGetR l s
+            other -> other
+
+    getBytes = getByteString
+
+    remaining = VGet $ \ s ->
+      return $ VGetR (fromIntegral $ vget_limit s `minusPtr` vget_target s) s
+
+    -- | just bytes, not children
+    isEmpty = VGet $ \ s -> return $ VGetR (vget_target s == vget_limit s) s
+
+    getWord8 = getWord8
+
+    -- | Load a number of bytes from the underlying object. A copy is
+    -- performed in this case (typically no copy is performed by VGet,
+    -- but the underlying pointer is ephemeral, becoming invalid after
+    -- the current read transaction). Fails if not enough data. O(N)
+    {-# INLINE getByteString #-}
+    getByteString n | (n > 0)   = _getByteString n
+                    | otherwise = return (BS.empty)
+
+    -- | Get a lazy bytestring. (Simple wrapper on strict bytestring.)
+    getLazyByteString n = LBS.fromStrict <$> getByteString (fromIntegral n)
+    {-# INLINE getLazyByteString #-}
+
+    getWord16le = consuming 2 $ VGet $ \ s -> do
+        let p = vget_target s
+        b0 <- peekByte p
+        b1 <- peekByte (p `plusPtr` 1)
+        let r = (fromIntegral b1 `shiftL`  8) .|.
+                (fromIntegral b0            )
+        let s' = s { vget_target = p `plusPtr` sizeOf r }
+        return (VGetR r s')
+    {-# INLINE getWord16le #-}
+
+    getWord16be = consuming 2 $ VGet $ \ s -> do
+        let p = vget_target s
+        b0 <- peekByte p
+        b1 <- peekByte (p `plusPtr` 1)
+        let r = (fromIntegral b0 `shiftL`  8) .|.
+                (fromIntegral b1            )
+        let s' = s { vget_target = p `plusPtr` sizeOf r }
+        return (VGetR r s')
+    {-# INLINE getWord16be #-}
+
+    getWord16host = getStorableUnaligned
+    {-# INLINE getWord16host #-}
+
+    getWord32le = consuming 4 $ VGet $ \ s -> do
+        let p = vget_target s
+        b0 <- peekByte p
+        b1 <- peekByte (p `plusPtr` 1)
+        b2 <- peekByte (p `plusPtr` 2)
+        b3 <- peekByte (p `plusPtr` 3)
+        let r = (fromIntegral b3 `shiftL` 24) .|.
+                (fromIntegral b2 `shiftL` 16) .|.
+                (fromIntegral b1 `shiftL`  8) .|.
+                (fromIntegral b0            )
+        let s' = s { vget_target = p `plusPtr` sizeOf r }
+        return (VGetR r s')
+    {-# INLINE getWord32le #-}
+
+    getWord32be = consuming 4 $ VGet $ \ s -> do
+        let p = vget_target s
+        b0 <- peekByte p
+        b1 <- peekByte (p `plusPtr` 1)
+        b2 <- peekByte (p `plusPtr` 2)
+        b3 <- peekByte (p `plusPtr` 3)
+        let r = (fromIntegral b0 `shiftL` 24) .|.
+                (fromIntegral b1 `shiftL` 16) .|.
+                (fromIntegral b2 `shiftL`  8) .|.
+                (fromIntegral b3            )
+        let s' = s { vget_target = p `plusPtr` sizeOf r }
+        return (VGetR r s')
+    {-# INLINE getWord32be #-}
+
+    getWord32host = getStorableUnaligned
+    {-# INLINE getWord32host #-}
+
+    getWord64le = consuming 8 $ VGet $ \ s -> do
+        let p = vget_target s
+        b0 <- peekByte p
+        b1 <- peekByte (p `plusPtr` 1)
+        b2 <- peekByte (p `plusPtr` 2)
+        b3 <- peekByte (p `plusPtr` 3)
+        b4 <- peekByte (p `plusPtr` 4)
+        b5 <- peekByte (p `plusPtr` 5)
+        b6 <- peekByte (p `plusPtr` 6)
+        b7 <- peekByte (p `plusPtr` 7)
+        let r = (fromIntegral b7 `shiftL` 56) .|.
+                (fromIntegral b6 `shiftL` 48) .|.
+                (fromIntegral b5 `shiftL` 40) .|.
+                (fromIntegral b4 `shiftL` 32) .|.
+                (fromIntegral b3 `shiftL` 24) .|.
+                (fromIntegral b2 `shiftL` 16) .|.
+                (fromIntegral b1 `shiftL`  8) .|.
+                (fromIntegral b0            )
+        let s' = s { vget_target = p `plusPtr` sizeOf r }
+        return (VGetR r s')
+    {-# INLINE getWord64le #-}
+
+    getWord64be = consuming 8 $ VGet $ \ s -> do
+        let p = vget_target s
+        b0 <- peekByte p
+        b1 <- peekByte (p `plusPtr` 1)
+        b2 <- peekByte (p `plusPtr` 2)
+        b3 <- peekByte (p `plusPtr` 3)
+        b4 <- peekByte (p `plusPtr` 4)
+        b5 <- peekByte (p `plusPtr` 5)
+        b6 <- peekByte (p `plusPtr` 6)
+        b7 <- peekByte (p `plusPtr` 7)
+        let r = (fromIntegral b0 `shiftL` 56) .|.
+                (fromIntegral b1 `shiftL` 48) .|.
+                (fromIntegral b2 `shiftL` 40) .|.
+                (fromIntegral b3 `shiftL` 32) .|.
+                (fromIntegral b4 `shiftL` 24) .|.
+                (fromIntegral b5 `shiftL` 16) .|.
+                (fromIntegral b6 `shiftL`  8) .|.
+                (fromIntegral b7            )
+        let s' = s { vget_target = p `plusPtr` sizeOf r }
+        return (VGetR r s')
+    {-# INLINE getWord64be #-}
+
+    getWord64host = getStorableUnaligned
+    {-# INLINE getWord64host #-}
+
+    getWordhost = getStorableUnaligned
+    {-# INLINE getWordhost #-}
 
 -- | isolate a parser to a subset of bytes and value references. The
 -- child parser must process its entire input (all bytes and values)
@@ -127,103 +289,6 @@ getVSpace :: VGet VSpace
 getVSpace = VGet $ \ s -> return (VGetR (vget_space s) s)
 {-# INLINE getVSpace #-}
 
--- | Read words of size 16, 32, or 64 in little-endian or big-endian.
-getWord16le, getWord16be :: VGet Word16
-getWord32le, getWord32be :: VGet Word32
-getWord64le, getWord64be :: VGet Word64
-
-getWord16le = consuming 2 $ VGet $ \ s -> do
-    let p = vget_target s
-    b0 <- peekByte p
-    b1 <- peekByte (p `plusPtr` 1)
-    let r = (fromIntegral b1 `shiftL`  8) .|.
-            (fromIntegral b0            )
-    let s' = s { vget_target = p `plusPtr` 2 }
-    return (VGetR r s')
-{-# INLINE getWord16le #-}
-
-getWord32le = consuming 4 $ VGet $ \ s -> do
-    let p = vget_target s
-    b0 <- peekByte p
-    b1 <- peekByte (p `plusPtr` 1)
-    b2 <- peekByte (p `plusPtr` 2)
-    b3 <- peekByte (p `plusPtr` 3)
-    let r = (fromIntegral b3 `shiftL` 24) .|.
-            (fromIntegral b2 `shiftL` 16) .|.
-            (fromIntegral b1 `shiftL`  8) .|.
-            (fromIntegral b0            )
-    let s' = s { vget_target = p `plusPtr` 4 }
-    return (VGetR r s')
-{-# INLINE getWord32le #-}
-
-getWord64le = consuming 8 $ VGet $ \ s -> do
-    let p = vget_target s
-    b0 <- peekByte p
-    b1 <- peekByte (p `plusPtr` 1)
-    b2 <- peekByte (p `plusPtr` 2)
-    b3 <- peekByte (p `plusPtr` 3)
-    b4 <- peekByte (p `plusPtr` 4)
-    b5 <- peekByte (p `plusPtr` 5)
-    b6 <- peekByte (p `plusPtr` 6)
-    b7 <- peekByte (p `plusPtr` 7)
-    let r = (fromIntegral b7 `shiftL` 56) .|.
-            (fromIntegral b6 `shiftL` 48) .|.
-            (fromIntegral b5 `shiftL` 40) .|.
-            (fromIntegral b4 `shiftL` 32) .|.
-            (fromIntegral b3 `shiftL` 24) .|.
-            (fromIntegral b2 `shiftL` 16) .|.
-            (fromIntegral b1 `shiftL`  8) .|.
-            (fromIntegral b0            )
-    let s' = s { vget_target = p `plusPtr` 8 }
-    return (VGetR r s')
-{-# INLINE getWord64le #-}
-
-getWord16be = consuming 2 $ VGet $ \ s -> do
-    let p = vget_target s
-    b0 <- peekByte p
-    b1 <- peekByte (p `plusPtr` 1)
-    let r = (fromIntegral b0 `shiftL`  8) .|.
-            (fromIntegral b1            )
-    let s' = s { vget_target = p `plusPtr` 2 }
-    return (VGetR r s')
-{-# INLINE getWord16be #-}
-
-getWord32be = consuming 4 $ VGet $ \ s -> do
-    let p = vget_target s
-    b0 <- peekByte p
-    b1 <- peekByte (p `plusPtr` 1)
-    b2 <- peekByte (p `plusPtr` 2)
-    b3 <- peekByte (p `plusPtr` 3)
-    let r = (fromIntegral b0 `shiftL` 24) .|.
-            (fromIntegral b1 `shiftL` 16) .|.
-            (fromIntegral b2 `shiftL`  8) .|.
-            (fromIntegral b3            )
-    let s' = s { vget_target = p `plusPtr` 4 }
-    return (VGetR r s')
-{-# INLINE getWord32be #-}
-
-getWord64be = consuming 8 $ VGet $ \ s -> do
-    let p = vget_target s
-    b0 <- peekByte p
-    b1 <- peekByte (p `plusPtr` 1)
-    b2 <- peekByte (p `plusPtr` 2)
-    b3 <- peekByte (p `plusPtr` 3)
-    b4 <- peekByte (p `plusPtr` 4)
-    b5 <- peekByte (p `plusPtr` 5)
-    b6 <- peekByte (p `plusPtr` 6)
-    b7 <- peekByte (p `plusPtr` 7)
-    let r = (fromIntegral b0 `shiftL` 56) .|.
-            (fromIntegral b1 `shiftL` 48) .|.
-            (fromIntegral b2 `shiftL` 40) .|.
-            (fromIntegral b3 `shiftL` 32) .|.
-            (fromIntegral b4 `shiftL` 24) .|.
-            (fromIntegral b5 `shiftL` 16) .|.
-            (fromIntegral b6 `shiftL`  8) .|.
-            (fromIntegral b7            )
-    let s' = s { vget_target = p `plusPtr` 8 }
-    return (VGetR r s')
-{-# INLINE getWord64be #-}
-
 -- | Read a Storable value. In this case, the content should be
 -- bytes only, since pointers aren't really meaningful when persisted.
 -- Data is copied to an intermediate structure via alloca to avoid
@@ -236,14 +301,14 @@ _getStorable :: (Storable a) => a -> VGet a
 _getStorable _dummy = withBytes (sizeOf _dummy) (peekAligned . castPtr)
 {-# INLINE _getStorable #-}
 
--- | Load a number of bytes from the underlying object. A copy is
--- performed in this case (typically no copy is performed by VGet,
--- but the underlying pointer is ephemeral, becoming invalid after
--- the current read transaction). Fails if not enough data. O(N)
-getByteString :: Int -> VGet BS.ByteString
-getByteString n | (n > 0)   = _getByteString n
-                | otherwise = return (BS.empty)
-{-# INLINE getByteString #-}
+getStorableUnaligned :: (Storable a) => VGet a
+getStorableUnaligned = _getStorable undefined
+{-# INLINE getStorableUnaligned #-}
+
+_getStorableUnaligned :: (Storable a) => a -> VGet a
+_getStorableUnaligned _dummy = withBytes (sizeOf _dummy) (peek . castPtr)
+{-# INLINE _getStorableUnaligned #-}
+
 
 _getByteString :: Int -> VGet BS.ByteString
 _getByteString n = withBytes n $ \ pSrc -> do
@@ -251,11 +316,6 @@ _getByteString n = withBytes n $ \ pSrc -> do
     copyBytes pDst pSrc n
     fp <- newForeignPtr finalizerFree pDst
     return $! BSI.fromForeignPtr fp 0 n
-
--- | Get a lazy bytestring. (Simple wrapper on strict bytestring.)
-getByteStringLazy :: Int -> VGet LBS.ByteString
-getByteStringLazy n = LBS.fromStrict <$> getByteString n
-{-# INLINE getByteStringLazy #-}
 
 -- | Access a given number of bytes without copying them. These bytes
 -- are read-only, and are considered to be consumed upon returning.
@@ -310,30 +370,3 @@ label sf op = VGet $ \ s ->
     case r of
         VGetE emsg -> VGetE (sf emsg)
         ok@(VGetR _ _) -> ok
-
--- | lookAhead will parse a value, but not consume any input.
-lookAhead :: VGet a -> VGet a
-lookAhead op = VGet $ \ s ->
-    _vget op s >>= \ result ->
-    return $
-    case result of
-        VGetR r _ -> VGetR r s
-        other -> other
-
--- | lookAheadM will consume input only if it returns `Just a`.
-lookAheadM :: VGet (Maybe a) -> VGet (Maybe a)
-lookAheadM op = VGet $ \ s ->
-    _vget op s >>= \ result ->
-    return $
-    case result of
-        VGetR Nothing _ -> VGetR Nothing s
-        other -> other
-
--- | lookAheadE will consume input only if it returns `Right b`.
-lookAheadE :: VGet (Either a b) -> VGet (Either a b)
-lookAheadE op = VGet $ \ s ->
-    _vget op s >>= \ result ->
-    return $
-    case result of
-        VGetR l@(Left _) _ -> VGetR l s
-        other -> other

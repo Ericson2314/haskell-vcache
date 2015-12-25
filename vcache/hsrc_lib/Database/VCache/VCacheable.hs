@@ -1,5 +1,8 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 
 module Database.VCache.VCacheable
     ( VCacheable(..)
@@ -11,14 +14,43 @@ import Control.Applicative
 import Control.Monad
 
 import Data.Word
+import Data.Coerce
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 
+import qualified Database.Generic as G
+
 import Database.VCache.VGet
 import Database.VCache.VPut
-import Database.VCache.Types
+import Database.VCache.Types as T
 
 -- VCacheable defined in Database.VCache.Types
+
+instance G.MonadGet VGet VRef where
+    getRef :: forall a. G.Persistable a => VGet (VRef a)
+    getRef = coerce (getVRef :: G.Persistable a => VGet (VRef (GenericCacheable a)))
+
+instance G.MonadGetMut VGet VRef PVar where
+    getVar :: forall a. G.PersistableMut a => VGet (PVar a)
+    getVar = coerce (getPVar :: G.Persistable a => VGet (PVar (GenericCacheable a)))
+
+instance G.MonadPut VPut VRef where
+    putRef :: forall a. G.Persistable a => (VRef a) -> VPut ()
+    putRef = coerce (putVRef :: G.Persistable a => VRef (GenericCacheable a) -> VPut ())
+
+instance G.MonadPutMut VPut VRef PVar where
+    putVar :: forall a. G.PersistableMut a => PVar a -> VPut ()
+    putVar = coerce (putPVar :: G.Persistable a => PVar (GenericCacheable a) -> VPut ())
+
+
+instance G.Persistable a => VCacheable (GenericCacheable a) where
+    put = G.put . unGenericCacheable
+    get = GenericCacheable <$> G.get
+
+instance G.PersistableMut a => VCacheable (GenericCacheableMut a) where
+    put = G.put . unGenericCacheableMut
+    get = GenericCacheableMut <$> G.get
+
 
 instance VCacheable Int where
     get = fromIntegral <$> getVarInt
@@ -59,8 +91,8 @@ instance VCacheable BS.ByteString where
     {-# INLINE put #-}
 
 instance VCacheable LBS.ByteString where
-    get = getVarNat >>= getByteStringLazy . fromIntegral
-    put s = putVarNat (fromIntegral $ LBS.length s) >> putByteStringLazy s
+    get = getVarNat >>= getLazyByteString . fromIntegral
+    put s = putVarNat (fromIntegral $ LBS.length s) >> putLazyByteString s
     {-# INLINE get #-}
     {-# INLINE put #-}
 

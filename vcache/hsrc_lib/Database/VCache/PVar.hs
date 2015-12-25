@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE TypeFamilies #-}
 module Database.VCache.PVar
     ( PVar
     , newPVar
@@ -19,10 +21,18 @@ module Database.VCache.PVar
 
 import Control.Concurrent.STM
 
+import Database.Generic
+
 import Database.VCache.Types
 import Database.VCache.Alloc ( newPVar, newPVars, newPVarIO, newPVarsIO
                              , loadRootPVar, loadRootPVarIO)
 import Database.VCache.Read (readRefctIO)
+import Database.VCache.VCacheable ()
+import Database.VCache.VRef ()
+
+instance StoreMut VCache where
+    type Var   VCache = PVar
+
 
 -- | Read a PVar as part of a transaction.
 readPVar :: PVar a -> VTx a

@@ -69,7 +69,7 @@ vgetFull parse = do
     return r
 
 assertDone :: VGet ()
-assertDone = isEmpty >>= \ b -> unless b (fail emsg) where
+assertDone = _isEmpty >>= \ b -> unless b (fail emsg) where
     emsg = "VCache: failed to read full input"
 {-# INLINE assertDone #-}
 

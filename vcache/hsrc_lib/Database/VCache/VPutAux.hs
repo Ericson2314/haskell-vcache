@@ -4,7 +4,7 @@
 module Database.VCache.VPutAux
     ( reserving, reserve
     , unsafePutWord8
-    , putWord8
+    , _putWord8
     , putVarNat
     , putVarInt
     , putVarNatR
@@ -71,22 +71,22 @@ unsafePutWord8 w8 = VPut $ \ s ->
 {-# INLINE unsafePutWord8 #-}
 
 -- | Store an 8 bit word.
-putWord8 :: Word8 -> VPut ()
-putWord8 w8 = reserving 1 $ unsafePutWord8 w8
-{-# INLINE putWord8 #-}
+_putWord8 :: Word8 -> VPut ()
+_putWord8 w8 = reserving 1 $ unsafePutWord8 w8
+{-# INLINE _putWord8 #-}
 
 -- | Put an arbitrary non-negative integer in 'varint' format associated
 -- with Google protocol buffers. This takes one byte for values 0..127,
 -- two bytes for 128..16k, etc.. Will fail if given a negative argument.
 putVarNat :: Integer -> VPut ()
 putVarNat n | (n < 0) = fail $ "putVarNat with " ++ show n
-            | otherwise = _putVarNat q >> putWord8 bLo
+            | otherwise = _putVarNat q >> _putWord8 bLo
   where q   = n `shiftR` 7
         bLo = 0x7f .&. fromIntegral n
 
 _putVarNat :: Integer -> VPut ()
 _putVarNat 0 = return ()
-_putVarNat n = _putVarNat q >> putWord8 b where
+_putVarNat n = _putVarNat q >> _putWord8 b where
     q = n `shiftR` 7
     b = 0x80 .|. (0x7f .&. fromIntegral n)
 
@@ -112,13 +112,13 @@ zigZag n | (n < 0)   = (negate n * 2) - 1
 -- from the end of the buffer.
 putVarNatR :: Int -> VPut ()
 putVarNatR n | (n < 0) = fail $ "putVarNatR with " ++ show n
-             | otherwise = putWord8 bLo >> _putVarNatR q
+             | otherwise = _putWord8 bLo >> _putVarNatR q
   where bLo  = 0x7f .&. fromIntegral n
         q    = n `shiftR` 7
 
 _putVarNatR :: Int -> VPut ()
 _putVarNatR 0 = return ()
-_putVarNatR n = putWord8 b >> _putVarNatR q where
+_putVarNatR n = _putWord8 b >> _putVarNatR q where
     b = 0x80 .|. (0x7f .&. fromIntegral n)
     q = n `shiftR` 7
 

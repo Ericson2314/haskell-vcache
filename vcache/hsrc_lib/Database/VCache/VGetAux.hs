@@ -2,8 +2,8 @@
 -- This module mostly exists to avoid cyclic dependencies
 module Database.VCache.VGetAux
     ( getWord8FromEnd
-    , getWord8
-    , isEmpty, vgetStateEmpty
+    , _getWord8
+    , _isEmpty, vgetStateEmpty
     , getVarNat
     , getVarInt
     , consuming
@@ -19,13 +19,13 @@ import Foreign.Storable
 import Database.VCache.Types
 
 -- | Read one byte of data, or fail if not enough data.
-getWord8 :: VGet Word8
-getWord8 = consuming 1 $ VGet $ \ s -> do
+_getWord8 :: VGet Word8
+_getWord8 = consuming 1 $ VGet $ \ s -> do
     let p = vget_target s
     r <- peekByte p
     let s' = s { vget_target = p `plusPtr` 1 }
     return (VGetR r s')
-{-# INLINE getWord8 #-}
+{-# INLINE _getWord8 #-}
 
 getWord8FromEnd :: VGet Word8
 getWord8FromEnd = consuming 1 $ VGet $ \ s -> do
@@ -42,11 +42,11 @@ peekByte = peek
 
 -- | isEmpty will return True iff there is no available input (neither
 -- references nor values).
-isEmpty :: VGet Bool
-isEmpty = VGet $ \ s ->
+_isEmpty :: VGet Bool
+_isEmpty = VGet $ \ s ->
     let bEOF = vgetStateEmpty s in
     bEOF `seq` return (VGetR bEOF s)
-{-# INLINE isEmpty #-}
+{-# INLINE _isEmpty #-}
 
 vgetStateEmpty :: VGetS -> Bool
 vgetStateEmpty s = (vget_target s == vget_limit s)
@@ -76,7 +76,7 @@ getVarNat = getVarNat' 0
 -- getVarNat' uses accumulator
 getVarNat' :: Integer -> VGet Integer
 getVarNat' !n =
-    getWord8 >>= \ w ->
+    _getWord8 >>= \ w ->
     let n' = (128 * n) + fromIntegral (w .&. 0x7f) in
     if (w < 128) then return $! n'
                  else getVarNat' n'

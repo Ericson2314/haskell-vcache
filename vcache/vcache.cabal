@@ -10,14 +10,14 @@ Description:
   .
   VCache was developed as an alternative to acid-state in a context where
   the persistent data is much bigger than the active working set and RAM.
-  Other similar packages include TCache and perdure. See the home page 
+  Other similar packages include TCache and perdure. See the home page
   for a simple comparison.
-  
+
 Author: David Barbour
 Maintainer: dmbarbour@gmail.com
 Homepage: http://github.com/dmbarbour/haskell-vcache
 
-Package-Url: 
+Package-Url:
 Copyright: (c) 2014-2015 by David Barbour
 License: BSD3
 license-file: LICENSE
@@ -26,7 +26,7 @@ build-type: Simple
 cabal-version: >= 1.16.0.3
 
 Extra-source-files:
-    README.md 
+    README.md
     changelog.md
 
 Source-repository head
@@ -39,6 +39,7 @@ Library
   default-language: Haskell2010
   Build-Depends: base (>= 4.6 && < 5)
     , direct-murmur-hash
+    , bytes (>= 0.15)
     , bytestring
     , transformers
     , containers (>= 0.5)
@@ -47,6 +48,7 @@ Library
     , filelock
     , easy-file
     , random (>= 1.0)
+    , generic-store
 
   Exposed-Modules:
     Database.VCache
@@ -78,6 +80,5 @@ Library
     Database.VCache.Write
     Database.VCache.Clean
     Database.VCache.Refct
-   
-  ghc-options: -Wall -auto-all
 
+  ghc-options: -Wall -auto-all

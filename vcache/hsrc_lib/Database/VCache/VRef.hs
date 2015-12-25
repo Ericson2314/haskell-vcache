@@ -1,4 +1,8 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Database.VCache.VRef
     ( VRef
@@ -16,6 +20,7 @@ module Database.VCache.VRef
     ) where
 
 import Control.Monad
+import Data.Coerce
 import Data.IORef
 import Data.Bits
 import Data.Word
@@ -24,9 +29,28 @@ import Foreign.Ptr
 import Foreign.Storable
 import System.IO.Unsafe
 
+import Database.Generic
+
 import Database.VCache.Types
 import Database.VCache.Alloc
 import Database.VCache.Read
+import Database.VCache.VCacheable ()
+
+
+instance Store VCache where
+    type Ref   VCache = VRef
+    type Space VCache = VSpace
+
+    type Put   VCache = VPut
+    type Get   VCache = VGet
+
+    ref :: forall a. Persistable a => VSpace -> a -> VRef a
+    ref sp = coerce (vref sp :: GenericCacheable a -> VRef (GenericCacheable a))
+    {-# INLINE ref #-}
+
+    deref = _deref
+    {-# INLINE deref #-}
+
 
 -- | Construct a reference with the cache initially active, i.e.
 -- such that immediate deref can access the value without reading
@@ -59,9 +83,9 @@ readVRef v = readAddrIO (vref_space v) (vref_addr v) (vref_parse v)
 --
 -- Assuming a valid VCacheable instance, this operation should return
 -- an equivalent value as was used to construct the VRef.
-deref :: VRef a -> a
-deref = derefc CacheMode1
-{-# INLINE deref #-}
+_deref :: VRef a -> a
+_deref = derefc CacheMode1
+{-# INLINE _deref #-}
 
 -- | Dereference a VRef with an alternative cache control mode.
 derefc :: CacheMode -> VRef a -> a

@@ -71,7 +71,7 @@ readAddrs =
 -- read address offsets until end of input
 readAddrs' :: [Address] -> Integer -> VGet [Address]
 readAddrs' addrs !nLast =
-    isEmpty >>= \ bEmpty ->
+    _isEmpty >>= \ bEmpty ->
     if bEmpty then return addrs else
     getVarInt >>= \ nOff ->
     let nCurr = nLast + nOff in

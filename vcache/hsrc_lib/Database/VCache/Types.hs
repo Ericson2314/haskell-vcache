@@ -1,4 +1,7 @@
 {-# LANGUAGE DeriveDataTypeable, ExistentialQuantification, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE RoleAnnotations #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE BangPatterns #-}
 
 -- Internal file. Lots of types. Lots of coupling.
@@ -18,6 +21,8 @@ module Database.VCache.Types
     , VTx(..), VTxState(..), TxW(..), VTxBatch(..)
     , Writes(..), WriteLog, WriteCt(..)
     , CacheSizeEst(..)
+    , GenericCacheable(..)
+    , GenericCacheableMut(..)
 
     -- misc. utilities
     , allocFrameSearch
@@ -96,6 +101,7 @@ isPVarAddr = not . isVRefAddr
 -- equality without violating conceptual purity. It also simplifies
 -- reasoning about idempotence, storage costs, memoization, etc..
 --
+type role VRef representational
 data VRef a = VRef
     { vref_addr   :: {-# UNPACK #-} !Address            -- ^ address within the cache
     , vref_cache  :: {-# UNPACK #-} !(IORef (Cache a))  -- ^ cached value & weak refs
@@ -230,6 +236,7 @@ mkVRefCache val !w !cm = Cached val cw where
 -- Note: PVars must never contain undefined or error values, nor any
 -- value that cannot be serialized by a VCacheable instance.
 --
+type role PVar representational
 data PVar a = PVar
     { pvar_addr  :: {-# UNPACK #-} !Address
     , pvar_data  :: {-# UNPACK #-} !(TVar (RDV a))
@@ -635,3 +642,9 @@ class (Typeable a) => VCacheable a where
 
     -- | Parse a value from its serialized representation into memory.
     get :: VGet a
+
+newtype GenericCacheable a = GenericCacheable { unGenericCacheable :: a }
+                           deriving (Typeable)
+
+newtype GenericCacheableMut a = GenericCacheableMut { unGenericCacheableMut :: a }
+                              deriving (Typeable)

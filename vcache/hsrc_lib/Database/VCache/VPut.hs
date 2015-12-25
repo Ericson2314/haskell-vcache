@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 module Database.VCache.VPut
     ( VPut
 
@@ -12,7 +13,7 @@ module Database.VCache.VPut
     , putStorable
     , putVarNat, putVarInt
     , reserve, reserving, unsafePutWord8
-    , putByteString, putByteStringLazy
+    , putByteString, putLazyByteString
     , putc
 
     , peekBufferSize
@@ -21,6 +22,7 @@ module Database.VCache.VPut
 
 import Control.Applicative
 import Data.Bits
+import Data.Bytes.Put
 import Data.Char
 import Data.Word
 import qualified Data.List as L
@@ -37,6 +39,97 @@ import Database.VCache.Types
 import Database.VCache.Aligned
 import Database.VCache.VPutAux
 -- import Database.VCache.Impl
+
+instance MonadPut VPut where
+    putWord8 = _putWord8
+    {-# INLINE putWord8 #-}
+
+    -- | Put the contents of a bytestring directly. Unlike the 'put' method for
+    -- bytestrings, this does not include size information; just raw bytes.
+    putByteString s = reserving (BS.length s) (_putByteString s)
+    {-# INLINE putByteString #-}
+
+    -- | Put contents of a lazy bytestring directly. Unlike the 'put' method for
+    -- bytestrings, this does not include size information; just raw bytes.
+    putLazyByteString s = reserving (fromIntegral $ LBS.length s)
+                          (mapM_ _putByteString (LBS.toChunks s))
+    {-# INLINE putLazyByteString #-}
+
+    flush = return ()
+    {-# INLINE flush #-}
+
+    putWord16le w = reserving 2 $ VPut $ \ s -> do
+        let p = vput_target s
+        let s' = s { vput_target = (p `plusPtr` 2) }
+        poke (p            ) (fromIntegral (w           ) :: Word8)
+        poke (p `plusPtr` 1) (fromIntegral (w `shiftR` 8) :: Word8)
+        return (VPutR () s')
+    {-# INLINE putWord16le #-}
+
+    putWord16be w = reserving 2 $ VPut $ \ s -> do
+        let p = vput_target s
+        let s' = s { vput_target = (p `plusPtr` 2) }
+        poke (p            ) (fromIntegral (w `shiftR` 8) :: Word8)
+        poke (p `plusPtr` 1) (fromIntegral (w           ) :: Word8)
+        return (VPutR () s')
+    {-# INLINE putWord16be #-}
+
+    putWord16host = putStorableUnaligned
+
+    putWord32le w = reserving 4 $ VPut $ \ s -> do
+        let p = vput_target s
+        let s' = s { vput_target = (p `plusPtr` 4) }
+        poke (p            ) (fromIntegral (w            ) :: Word8)
+        poke (p `plusPtr` 1) (fromIntegral (w `shiftR`  8) :: Word8)
+        poke (p `plusPtr` 2) (fromIntegral (w `shiftR` 16) :: Word8)
+        poke (p `plusPtr` 3) (fromIntegral (w `shiftR` 24) :: Word8)
+        return (VPutR () s')
+    {-# INLINE putWord32le #-}
+
+    putWord32be w = reserving 4 $ VPut $ \ s -> do
+        let p = vput_target s
+        let s' = s { vput_target = (p `plusPtr` 4) }
+        poke (p            ) (fromIntegral (w `shiftR` 24) :: Word8)
+        poke (p `plusPtr` 1) (fromIntegral (w `shiftR` 16) :: Word8)
+        poke (p `plusPtr` 2) (fromIntegral (w `shiftR`  8) :: Word8)
+        poke (p `plusPtr` 3) (fromIntegral (w            ) :: Word8)
+        return (VPutR () s')
+    {-# INLINE putWord32be #-}
+
+    putWord32host = putStorableUnaligned
+
+    putWord64le w = reserving 8 $ VPut $ \ s -> do
+        let p = vput_target s
+        let s' = s { vput_target = (p `plusPtr` 8) }
+        poke (p            ) (fromIntegral (w            ) :: Word8)
+        poke (p `plusPtr` 1) (fromIntegral (w `shiftR`  8) :: Word8)
+        poke (p `plusPtr` 2) (fromIntegral (w `shiftR` 16) :: Word8)
+        poke (p `plusPtr` 3) (fromIntegral (w `shiftR` 24) :: Word8)
+        poke (p `plusPtr` 4) (fromIntegral (w `shiftR` 32) :: Word8)
+        poke (p `plusPtr` 5) (fromIntegral (w `shiftR` 40) :: Word8)
+        poke (p `plusPtr` 6) (fromIntegral (w `shiftR` 48) :: Word8)
+        poke (p `plusPtr` 7) (fromIntegral (w `shiftR` 56) :: Word8)
+        return (VPutR () s')
+    {-# INLINE putWord64le #-}
+
+    putWord64be w = reserving 8 $ VPut $ \ s -> do
+        let p = vput_target s
+        let s' = s { vput_target = (p `plusPtr` 8) }
+        poke (p            ) (fromIntegral (w `shiftR` 56) :: Word8)
+        poke (p `plusPtr` 1) (fromIntegral (w `shiftR` 48) :: Word8)
+        poke (p `plusPtr` 2) (fromIntegral (w `shiftR` 40) :: Word8)
+        poke (p `plusPtr` 3) (fromIntegral (w `shiftR` 32) :: Word8)
+        poke (p `plusPtr` 4) (fromIntegral (w `shiftR` 24) :: Word8)
+        poke (p `plusPtr` 5) (fromIntegral (w `shiftR` 16) :: Word8)
+        poke (p `plusPtr` 6) (fromIntegral (w `shiftR`  8) :: Word8)
+        poke (p `plusPtr` 7) (fromIntegral (w            ) :: Word8)
+        return (VPutR () s')
+    {-# INLINE putWord64be #-}
+
+    putWord64host = putStorableUnaligned
+
+    putWordhost = putStorableUnaligned
+
 
 -- | Store a reference to a value. The value reference must already
 -- use the same VCache and addres space as where you're putting it.
@@ -82,86 +175,12 @@ putVSpace vc = VPut $ \ s ->
     fail $ "putVSpace argument is not same as destination VCache"
 {-# INLINE putVSpace #-}
 
--- | Put a Word in little-endian or big-endian form.
---
--- Note: These are mostly included because they're part of the
--- Data.Binary and Data.Cereal APIs. They may be useful in some
--- cases, but putVarInt will frequently be preferable.
-putWord16le, putWord16be :: Word16 -> VPut ()
-putWord32le, putWord32be :: Word32 -> VPut ()
-putWord64le, putWord64be :: Word64 -> VPut ()
-
 -- THOUGHTS: I could probably optimize these further by using
 -- an intermediate type and some rewriting to combine reserve
 -- operations. However, I doubt I'll actually use putWord* all
 -- that much... mostly just including to match the Data.Cereal
 -- and Data.Binary APIs. I expect to use variable-sized integers
 -- and such much more frequently.
-
-
-putWord16le w = reserving 2 $ VPut $ \ s -> do
-    let p = vput_target s
-    let s' = s { vput_target = (p `plusPtr` 2) }
-    poke (p            ) (fromIntegral (w           ) :: Word8)
-    poke (p `plusPtr` 1) (fromIntegral (w `shiftR` 8) :: Word8)
-    return (VPutR () s')
-{-# INLINE putWord16le #-}
-
-putWord32le w = reserving 4 $ VPut $ \ s -> do
-    let p = vput_target s
-    let s' = s { vput_target = (p `plusPtr` 4) }
-    poke (p            ) (fromIntegral (w            ) :: Word8)
-    poke (p `plusPtr` 1) (fromIntegral (w `shiftR`  8) :: Word8)
-    poke (p `plusPtr` 2) (fromIntegral (w `shiftR` 16) :: Word8)
-    poke (p `plusPtr` 3) (fromIntegral (w `shiftR` 24) :: Word8)
-    return (VPutR () s')
-{-# INLINE putWord32le #-}
-
-putWord64le w = reserving 8 $ VPut $ \ s -> do
-    let p = vput_target s
-    let s' = s { vput_target = (p `plusPtr` 8) }
-    poke (p            ) (fromIntegral (w            ) :: Word8)
-    poke (p `plusPtr` 1) (fromIntegral (w `shiftR`  8) :: Word8)
-    poke (p `plusPtr` 2) (fromIntegral (w `shiftR` 16) :: Word8)
-    poke (p `plusPtr` 3) (fromIntegral (w `shiftR` 24) :: Word8)
-    poke (p `plusPtr` 4) (fromIntegral (w `shiftR` 32) :: Word8)
-    poke (p `plusPtr` 5) (fromIntegral (w `shiftR` 40) :: Word8)
-    poke (p `plusPtr` 6) (fromIntegral (w `shiftR` 48) :: Word8)
-    poke (p `plusPtr` 7) (fromIntegral (w `shiftR` 56) :: Word8)
-    return (VPutR () s')
-{-# INLINE putWord64le #-}
-
-putWord16be w = reserving 2 $ VPut $ \ s -> do
-    let p = vput_target s
-    let s' = s { vput_target = (p `plusPtr` 2) }
-    poke (p            ) (fromIntegral (w `shiftR` 8) :: Word8)
-    poke (p `plusPtr` 1) (fromIntegral (w           ) :: Word8)
-    return (VPutR () s')
-{-# INLINE putWord16be #-}
-
-putWord32be w = reserving 4 $ VPut $ \ s -> do
-    let p = vput_target s
-    let s' = s { vput_target = (p `plusPtr` 4) }
-    poke (p            ) (fromIntegral (w `shiftR` 24) :: Word8)
-    poke (p `plusPtr` 1) (fromIntegral (w `shiftR` 16) :: Word8)
-    poke (p `plusPtr` 2) (fromIntegral (w `shiftR`  8) :: Word8)
-    poke (p `plusPtr` 3) (fromIntegral (w            ) :: Word8)
-    return (VPutR () s')
-{-# INLINE putWord32be #-}
-
-putWord64be w = reserving 8 $ VPut $ \ s -> do
-    let p = vput_target s
-    let s' = s { vput_target = (p `plusPtr` 8) }
-    poke (p            ) (fromIntegral (w `shiftR` 56) :: Word8)
-    poke (p `plusPtr` 1) (fromIntegral (w `shiftR` 48) :: Word8)
-    poke (p `plusPtr` 2) (fromIntegral (w `shiftR` 40) :: Word8)
-    poke (p `plusPtr` 3) (fromIntegral (w `shiftR` 32) :: Word8)
-    poke (p `plusPtr` 4) (fromIntegral (w `shiftR` 24) :: Word8)
-    poke (p `plusPtr` 5) (fromIntegral (w `shiftR` 16) :: Word8)
-    poke (p `plusPtr` 6) (fromIntegral (w `shiftR`  8) :: Word8)
-    poke (p `plusPtr` 7) (fromIntegral (w            ) :: Word8)
-    return (VPutR () s')
-{-# INLINE putWord64be #-}
 
 -- | Put a Data.Storable value, using intermediate storage to
 -- ensure alignment when serializing argument. Note that this
@@ -179,17 +198,15 @@ putStorable a =
         return (VPutR () s')
 {-# INLINABLE putStorable #-}
 
--- | Put the contents of a bytestring directly. Unlike the 'put' method for
--- bytestrings, this does not include size information; just raw bytes.
-putByteString :: BS.ByteString -> VPut ()
-putByteString s = reserving (BS.length s) (_putByteString s)
-{-# INLINE putByteString #-}
-
--- | Put contents of a lazy bytestring directly. Unlike the 'put' method for
--- bytestrings, this does not include size information; just raw bytes.
-putByteStringLazy :: LBS.ByteString -> VPut ()
-putByteStringLazy s = reserving (fromIntegral $ LBS.length s) (mapM_ _putByteString (LBS.toChunks s))
-{-# INLINE putByteStringLazy #-}
+putStorableUnaligned :: (Storable a) => a -> VPut ()
+putStorableUnaligned a = do
+    let n = sizeOf a
+    reserving n $ VPut $ \ s -> do
+        let pTgt = vput_target s
+        let s' = s { vput_target = (pTgt `plusPtr` n) }
+        poke (castPtr pTgt) a
+        return (VPutR () s')
+{-# INLINABLE putStorableUnaligned #-}
 
 -- put a byte string, assuming enough space has been reserved already.
 -- this uses a simple memcpy to the target space.
@@ -204,7 +221,7 @@ _putByteString (BSI.PS fpSrc p_off p_len) =
 
 -- | Put a character in UTF-8 format.
 putc :: Char -> VPut ()
-putc a | c <= 0x7f      = putWord8 (fromIntegral c)
+putc a | c <= 0x7f      = _putWord8 (fromIntegral c)
        | c <= 0x7ff     = reserving 2 $ VPut $ \ s -> do
                             let p  = vput_target s
                             let s' = s { vput_target = (p `plusPtr` 2) }
